@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "hw.h"
+#include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
 #include <ESP_I2S.h>
@@ -17,7 +18,7 @@
 #define PIN_I2S_BCK 9
 #define PIN_I2S_WS 45
 #define PIN_I2S_DO 8
-#define PIN_I2S_MCK 42
+#define PIN_I2S_MCK I2S_MCK_PIN
 #define PIN_PA 46
 #define ES8311_ADDR 0x18
 #define SAMPLE_RATE 16000
@@ -25,6 +26,7 @@
 static I2SClass i2s;
 static bool audioReady = false;
 static bool audioOn = true;
+static volatile uint8_t audioVol = 60;  // 0-100
 static QueueHandle_t audioQ = nullptr;
 
 static bool esW(uint8_t reg, uint8_t val) {
@@ -86,7 +88,7 @@ static int16_t sbuf[256 * 2];
 static void playTone(uint16_t f, uint16_t ms) {
   int total = SAMPLE_RATE * ms / 1000;
   int half = f ? (SAMPLE_RATE / (2 * f)) : 0;
-  const int16_t amp = 5000;
+  const int16_t amp = (int16_t)(8300 * audioVol / 100);
   int phase = 0, done = 0;
   bool high = true;
   while (done < total) {
@@ -130,6 +132,7 @@ static void audioBegin() {
   Preferences p;
   p.begin("claudebuddy", true);
   audioOn = p.getBool("snd", true);
+  audioVol = p.getUChar("vol", 60);
   p.end();
   i2s.setPins(PIN_I2S_BCK, PIN_I2S_WS, PIN_I2S_DO, -1, PIN_I2S_MCK);
   if (!i2s.begin(I2S_MODE_STD, SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) return;
@@ -139,7 +142,14 @@ static void audioBegin() {
   audioReady = true;
 }
 
+static bool quiet = false;
+void hwStandby(bool on) {
+  quiet = on;
+  if (on && audioQ) xQueueReset(audioQ);
+}
+
 void sfxPlay(uint8_t id) {
+  if (quiet || audioVol == 0) return;
   if (audioReady && audioOn && audioQ) xQueueSend(audioQ, &id, 0);
 }
 void audioSetEnabled(bool on) {
@@ -150,6 +160,14 @@ void audioSetEnabled(bool on) {
   p.end();
 }
 bool audioEnabled() { return audioReady && audioOn; }
+uint8_t audioVolume() { return audioVol; }
+void audioSetVolume(uint8_t pct) {
+  audioVol = pct > 100 ? 100 : pct;
+  Preferences p;
+  p.begin("claudebuddy", false);
+  p.putUChar("vol", audioVol);
+  p.end();
+}
 
 // ===================================================================== IMU
 // QMI8658 a registri diretti (solo accelerometro, 4 g, ~62 Hz).
@@ -256,7 +274,31 @@ static bool cCharging = false, cUsb = true;
 
 static void batBegin() {
   pmuOk = pmu.begin(Wire, AXP2101_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
-  if (pmuOk) pmu.enableBattVoltageMeasure();
+  if (!pmuOk) return;
+  pmu.enableBattVoltageMeasure();
+  // tasto POWER: pressione breve e lunga (1.5 s) come eventi, letti a polling (niente pin IRQ).
+  // Lo spegnimento hardware con pressione di 6 s resta come ultima risorsa.
+  pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
+  pmu.clearIrqStatus();
+  pmu.setIrqLevelTime(XPOWERS_AXP2101_IRQ_TIME_1S5);
+  pmu.setPowerKeyPressOffTime(XPOWERS_POWEROFF_6S);
+  pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ | XPOWERS_AXP2101_PKEY_LONG_IRQ);
+}
+
+PwrKey pwrKeyPoll(uint32_t now) {
+  static uint32_t last = 0;
+  if (!pmuOk || now - last < 100) return PWR_NONE;
+  last = now;
+  pmu.getIrqStatus();
+  PwrKey k = PWR_NONE;
+  if (pmu.isPekeyLongPressIrq()) k = PWR_LONG;
+  else if (pmu.isPekeyShortPressIrq()) k = PWR_SHORT;
+  if (k != PWR_NONE) pmu.clearIrqStatus();
+  return k;
+}
+
+void hwPowerOff() {
+  if (pmuOk) pmu.shutdown();
 }
 
 void batUpdate(uint32_t now) {

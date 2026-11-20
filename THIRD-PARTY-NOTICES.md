@@ -1,14 +1,14 @@
-# Note sulle componenti di terze parti
+# Third-party components
 
-Il codice di questo repository e' rilasciato con licenza MIT (vedi `LICENSE`). Il progetto usa o
-si ispira a quanto segue, ognuno con la propria licenza.
+The code in this repository is released under the MIT license (see `LICENSE`). The project uses or
+is inspired by the following, each under its own license.
 
 ## TamaPoke (MIT)
 
-Alcune parti del firmware (`claude_buddy/hw.cpp`, inizializzazione del touch in `claude_buddy.ino`)
-seguono le sequenze verificate sulla scheda nel progetto **TamaPoke**: configurazione del codec
-ES8311 e sintesi dei toni, gestione dell'interrupt del touch CST9217, lettura a registri diretti del
-sensore QMI8658, lettura di RTC e PMU.
+Some parts of the firmware (`claude_buddy/hw.cpp`, touch initialization in `claude_buddy.ino`)
+follow the sequences verified on the board in the **TamaPoke** project: ES8311 codec configuration
+and tone synthesis, CST9217 touch interrupt handling, direct-register reads of the QMI8658 sensor,
+RTC and PMU reads.
 
 ```
 MIT License
@@ -34,20 +34,21 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Librerie (non incluse nel repository, da installare)
+## Libraries (not included in the repository, install separately)
 
-| Libreria | Uso | Licenza |
+| Library | Use | License |
 |---|---|---|
-| GFX Library for Arduino (moononournation) | driver del display CO5300 | BSD-style, vedi la libreria |
-| SensorLib (Lewis He) | touch CST9217, RTC PCF85063 | MIT |
-| XPowersLib (Lewis He) | PMU AXP2101 (batteria) | MIT |
-| Core esp32 (Espressif) | framework, I2S, Preferences | LGPL-2.1 / Apache-2.0 |
+| GFX Library for Arduino (moononournation) | CO5300 display driver | BSD-style, see the library |
+| SensorLib (Lewis He) | CST9217 touch, PCF85063 RTC | MIT |
+| XPowersLib (Lewis He) | AXP2101 PMU (battery, POWER key) | MIT |
+| Core esp32 (Espressif) | framework, I2S, Preferences, BLE (NimBLE) | LGPL-2.1 / Apache-2.0 |
+| bleak (Henrik Blidh) | BLE client on the PC (`host/ble_bridge.py`), installed with pip | MIT |
 
-La sequenza di inizializzazione del codec ES8311 deriva dal driver ufficiale Espressif (esp-bsp,
-Apache-2.0) e dal progetto TamaPoke.
+The ES8311 codec initialization sequence derives from the official Espressif driver (esp-bsp,
+Apache-2.0) and from the TamaPoke project.
 
-## Marchi
+## Trademarks
 
-Questo e' un progetto non ufficiale e indipendente, **non affiliato ne' approvato da Anthropic**.
-"Claude", "Claude Code" e la mascotte "Clawd" appartengono ad Anthropic. Il disegno di Clawd nel
-firmware e' una semplice riproduzione a blocchi pensata per uso personale.
+This is an unofficial, independent project, **not affiliated with or endorsed by Anthropic**.
+"Claude", "Claude Code" and the "Clawd" mascot belong to Anthropic. The Clawd drawing in the
+firmware is a simple block reproduction intended for personal use.

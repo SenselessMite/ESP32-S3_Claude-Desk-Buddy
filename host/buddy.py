@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Claude Buddy - ponte tra Claude Code e la scheda (USB seriale).
+"""Claude Buddy - ponte tra Claude Code e la scheda (USB seriale o BLE).
 
 Modi d'uso (tutti silenziosi: un errore qui non deve mai disturbare Claude Code):
   buddy.py hook         legge dallo stdin il JSON di un hook e aggiorna lo stato
@@ -9,6 +9,13 @@ Modi d'uso (tutti silenziosi: un errore qui non deve mai disturbare Claude Code)
   buddy.py send <riga>  manda una riga grezza alla scheda (prove)
   buddy.py show         stampa lo snapshot che verrebbe inviato
   buddy.py clear        dimentica tutte le sessioni
+  buddy.py unpair                 la scheda dimentica i PC associati via BLE (usa l'USB)
+  buddy.py standby|wake|off       mette la scheda in standby, la risveglia, la spegne
+  buddy.py autostandby <minuti>   standby automatico a batteria (0 = mai)
+  buddy.py ble start|stop|status  gestisce il demone BLE (vedi ble_bridge.py)
+
+Trasporto: file host/transport.txt con "serial" (default), "ble" oppure "auto" (BLE se il
+demone e' connesso alla scheda, altrimenti seriale).
 
 Ogni sessione di Claude Code ha un file in host/state/<session_id>.json. A ogni
 evento si ricalcola lo stato complessivo e si manda alla scheda uno snapshot:
@@ -32,6 +39,8 @@ evento si ricalcola lo stato complessivo e si manda alla scheda uno snapshot:
 import json
 import os
 import re
+import socket
+import subprocess
 import sys
 import time
 import unicodedata
@@ -50,6 +59,9 @@ FX_FILE = os.path.join(STATE_DIR, "fx.json")
 FX_SHOW_S = 15
 MSG_MAX = 380
 LOCK_FILE = os.path.join(STATE_DIR, ".lock")
+BLE_PORT = 47633          # il demone BLE ascolta solo su 127.0.0.1
+BLE_SPAWN_FILE = os.path.join(STATE_DIR, "ble_spawn.txt")
+BLE_SPAWN_EVERY_S = 30    # al massimo un tentativo di avvio del demone ogni 30 s
 
 DONE_SHOW_S = 4          # "fatto" vale solo per pochi secondi (< 5 s della scheda, poi la sessione e' a riposo)
 ERROR_SHOW_S = 3.5       # durata della faccia perplessa dopo un tool fallito
@@ -74,6 +86,15 @@ def read_port():
             return f.read().strip()
     except OSError:
         return ""
+
+
+def read_transport():
+    try:
+        with open(os.path.join(HERE, "transport.txt")) as f:
+            t = f.read().strip().lower()
+    except OSError:
+        return "serial"
+    return t if t in ("serial", "ble", "auto") else "serial"
 
 
 def load_json(path):
@@ -499,7 +520,7 @@ def build_snapshot():
     return lines
 
 
-def send_lines(lines):
+def send_serial(lines):
     port = read_port()
     if not port:
         return
@@ -508,6 +529,55 @@ def send_lines(lines):
             f.write(("\n".join(lines) + "\n").encode("ascii", "replace"))
     except OSError:
         pass  # scheda scollegata o porta occupata (Serial Monitor aperto)
+
+
+def ble_request(payload, timeout=0.6):
+    """Parla col demone BLE. Ritorna la risposta ("OK" = scheda connessa e dati inoltrati,
+    "NO" = demone attivo ma scheda non connessa) oppure None se il demone non c'e'."""
+    try:
+        with socket.create_connection(("127.0.0.1", BLE_PORT), timeout=timeout) as c:
+            c.settimeout(timeout)
+            c.sendall(payload)
+            c.shutdown(socket.SHUT_WR)
+            return c.recv(16).decode("ascii", "replace").strip()
+    except OSError:
+        return None
+
+
+def start_ble_daemon(force=False):
+    """Avvia ble_bridge.py staccato dal processo corrente (senza finestra)."""
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        last = load_json(BLE_SPAWN_FILE)
+        if not force and isinstance(last, (int, float)) and time.time() - last < BLE_SPAWN_EVERY_S:
+            return
+        save_json(BLE_SPAWN_FILE, time.time())
+        exe = sys.executable
+        if os.name == "nt":
+            w = os.path.join(os.path.dirname(exe), "pythonw.exe")
+            if os.path.exists(w):
+                exe = w
+            flags = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED | NEW_PROCESS_GROUP | NO_WINDOW
+        else:
+            flags = 0
+        subprocess.Popen([exe, os.path.join(HERE, "ble_bridge.py")], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags,
+                         close_fds=True, **({"start_new_session": True} if os.name != "nt" else {}))
+    except Exception:
+        pass
+
+
+def send_lines(lines):
+    mode = read_transport()
+    if mode != "serial":
+        reply = ble_request(("\n".join(lines) + "\n").encode("ascii", "replace"))
+        if reply is None:
+            start_ble_daemon()  # la prossima volta sara' pronto
+        elif reply == "OK":
+            return
+        if mode == "ble":
+            return
+    send_serial(lines)
 
 
 def send_snapshot():
@@ -528,6 +598,19 @@ def main():
         handle_statusline(read_stdin_json())
     elif mode == "send":
         send_lines([" ".join(sys.argv[2:])])
+    elif mode in ("standby", "wake", "off", "unpair"):
+        send_lines([mode])
+    elif mode == "autostandby":
+        send_lines(["autostandby " + (sys.argv[2] if len(sys.argv) > 2 else "10")])
+    elif mode == "ble":
+        sub = sys.argv[2] if len(sys.argv) > 2 else "status"
+        if sub == "start":
+            start_ble_daemon(force=True)
+        elif sub == "stop":
+            ble_request(b"__quit__\n")
+        else:
+            r = ble_request(b"__ping__\n")
+            print({"OK": "demone attivo, scheda connessa", "NO": "demone attivo, scheda non connessa"}.get(r, "demone non attivo"))
     elif mode == "show":
         print("\n".join(build_snapshot()))
     elif mode == "clear":

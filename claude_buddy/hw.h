@@ -25,6 +25,8 @@ bool hwPmuOk();
 // audio (non bloccante: gli effetti vanno in coda a una task dedicata)
 void sfxPlay(uint8_t id);
 void audioSetEnabled(bool on);  // salvato in flash
+void audioSetVolume(uint8_t pct);  // 0-100, salvato in flash (0 = muto)
+uint8_t audioVolume();
 bool audioEnabled();
 
 // movimento: true quando la scheda viene scossa con forza (max una volta ogni 4 s)
@@ -40,3 +42,9 @@ void batUpdate(uint32_t nowMs);  // legge il PMU ogni qualche secondo
 int batPercent();                // -1 se non c'e' batteria
 bool batCharging();
 bool usbPresent();
+
+// tasto POWER (collegato al PMU AXP2101): chiamare spesso (si limita da solo a ~10 Hz)
+enum PwrKey : uint8_t { PWR_NONE = 0, PWR_SHORT, PWR_LONG };
+PwrKey pwrKeyPoll(uint32_t nowMs);
+void hwPowerOff();            // spegne le tensioni (a batteria); con USB collegato potrebbe non spegnersi
+void hwStandby(bool on);      // standby: zittisce l'audio e ferma i suoni in coda

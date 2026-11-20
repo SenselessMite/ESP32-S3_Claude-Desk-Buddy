@@ -11,3 +11,6 @@ __pycache__/
 *.bak[0-9]
 build/
 .vscode/
+
+# trasporto scelto (serial / ble / auto)
+host/transport.txt

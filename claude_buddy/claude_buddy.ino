@@ -1,21 +1,20 @@
 // SPDX-License-Identifier: MIT
 /*
   Claude Buddy - compagno da scrivania per Claude Code
-  Scheda: Waveshare ESP32-S3-Touch-AMOLED-1.75 / 1.75-B (CO5300 466x466)
+  Scheda: Waveshare ESP32-S3-Touch-AMOLED-1.75 / 1.75-B / 1.75C (CO5300 466x466)
 
   Mostra Clawd, la mascotte di Claude Code, che reagisce a cio' che Claude sta facendo.
-  Riceve righe di testo via USB seriale (una per riga, terminate da 
-) dallo script
+  Riceve righe di testo via USB seriale oppure via BLE (Nordic UART, una per riga) dallo script
   host/buddy.py, che a sua volta e' chiamato dagli hook e dallo statusLine di Claude Code.
 
   Protocollo (maiuscole/minuscole indifferenti): idle | thinking | working [tool] |
   attention [msg] | done | error | sleep, sessions N, sess ..., usage ..., agents N, pet xp,
   stats ..., today ..., todo ..., msg ..., tick ..., fx ..., epoch ..., time HH:MM,
-  bright N, sound 0|1. Il dettaglio di ogni comando e' in README.md e in host/buddy.py.
+  bright N, sound 0|1, standby, wake, off, autostandby MIN, unpair. Il dettaglio di ogni comando e' in README.md e in host/buddy.py.
 
   Interfaccia: swipe orizzontale tra le pagine (Clawd, Sessioni, Usage, Oggi, Timer,
   Messaggio, Stile, Info); tieni premuto su Clawd per aprire Stile.
-  Tasto BOOT (GPIO0): scorre gli stati, utile per provare senza PC.
+  Tasto BOOT (GPIO0): breve = scorre gli stati (prova senza PC); tenuto premuto = impostazioni.
 
   Impostazioni Arduino IDE (vedi README.md):
     USB CDC On Boot: Enabled, PSRAM: OPI PSRAM, Flash 16MB,
@@ -29,7 +28,9 @@
 #include <sys/time.h>
 #include <Preferences.h>
 #include "Arduino_GFX_Library.h"
+#include "board.h"
 #include "hw.h"
+#include "ble.h"
 #include "TouchDrv.hpp"  // SensorLib: touch CST9217
 
 // ---- Pin (da HARDWARE_REFERENCE.md di Waveshare) ----
@@ -39,7 +40,7 @@
 #define LCD_SDIO3 7
 #define LCD_SCLK 38
 #define LCD_CS 12
-#define LCD_RESET 39
+#define LCD_RESET LCD_RESET_PIN
 #define LCD_WIDTH 466
 #define LCD_HEIGHT 466
 #define BOOT_PIN 0
@@ -47,7 +48,7 @@
 #define IIC_SDA 15
 #define IIC_SCL 14
 #define TP_INT 11
-#define TP_RESET 40
+#define TP_RESET TP_RESET_PIN
 #define TOUCH_ADDR 0x5A
 
 
@@ -95,6 +96,7 @@ char clockText[6] = "";  // "HH:MM" oppure vuoto
 
 TouchDrvCST92xx touch;
 volatile bool gTouchIrq = false;
+bool touchDebug = false;  // comando 'touchdebug 1': stampa i punti del touch sulla seriale
 bool touchOk = false;
 
 // ---- Dati dal PC: sessioni di Claude Code e usage ----
@@ -122,6 +124,8 @@ enum Page { PG_CLAWD, PG_SESSIONS, PG_USAGE, PG_TODAY, PG_TIMER, PG_MSG, PG_STYL
 uint8_t page = PG_CLAWD;
 uint32_t petUntil = 0;     // carezza: reazione di Clawd fino a questo millis
 uint32_t lastTouch = 0;    // ultimo tocco (sveglia lo schermo in sleep)
+// millisecondi trascorsi da t; 0 se t e' nel (piccolo) futuro rispetto a now (evita il wrap senza segno)
+#define ago(now, t) (((int32_t)((now) - (t)) < 0) ? 0u : (uint32_t)((now) - (t)))
 
 // sub-agent attivi (mini Clawd), esperienza/livello, costi di oggi
 uint8_t agentsN = 0;
@@ -175,10 +179,17 @@ const char *const GLS_NAMES[] = { "No", "Si", "Auto" };
 const uint8_t GLS_LVL[] = { 1, 6, 1 };
 uint8_t styleColor = 0, styleHat = 3, styleGlasses = 2;
 
-#define FW_VERSION "1.0"
+#define FW_VERSION "1.1"
 char ticker[124] = "";               // riga scorrevole in basso
 uint32_t alarmUntil = 0, resetUntil = 0;  // allarme usage / limite azzerato
 int alarmPct = 0;
+// ---- Ingresso righe: seriale USB e BLE (ognuno col suo buffer, senza mescolare le righe) ----
+struct LineIn {
+  char buf[448];
+  uint16_t len;
+};
+LineIn serIn, bleIn;
+
 uint32_t lastDataAt = 0;             // ultimo dato arrivato dal PC
 uint32_t bootStart = 0, bootEnd = 0; // animazione di avvio
 
@@ -211,6 +222,48 @@ void setBrightnessSmooth(uint8_t target) {
   else b = (b - 6 < target) ? target : b - 6;
   curBrightness = (uint8_t)b;
   panel->setBrightness(curBrightness);
+}
+
+// ---- Standby / spegnimento ----
+bool standby = false;
+bool settingsOpen = false;  // menu impostazioni aperto
+enum DemoKind : uint8_t { DM_NONE, DM_BORED, DM_TIRED, DM_FULL, DM_COLD, DM_LOWBAT };
+bool demoActive = false;
+int demoIdx = -1;
+uint8_t demoKind = DM_NONE;
+uint32_t demoRetrig = 0, demoEnds = 0;
+#define demoOn(k) (demoActive && demoKind == (k))
+uint16_t autoStandbyMin = 10;  // a batteria, dopo N minuti a riposo e senza tocchi; 0 = mai
+
+void enterStandby() {
+  if (standby) return;
+  standby = true;
+  settingsOpen = false;
+  hwStandby(true);
+  panel->setBrightness(0);
+  curBrightness = 0;
+  panel->displayOff();
+  setCpuFrequencyMhz(80);
+}
+
+void exitStandby() {
+  if (!standby) return;
+  setCpuFrequencyMhz(240);
+  panel->displayOn();
+  standby = false;
+  hwStandby(false);
+  lastTouch = millis();
+}
+
+void powerOff() {
+  g->fillScreen(RGB565_BLACK);
+  centerText("Spegnimento...", 220, 3, RGB565(200, 205, 220));
+  if (canvas) canvas->flush();
+  delay(900);
+  hwPowerOff();
+  delay(1500);
+  // ancora acceso: alimentato dall'USB, il PMU non toglie le tensioni. Si ripiega sullo standby.
+  enterStandby();
 }
 
 void centerText(const char *s, int y, uint8_t size, uint16_t color) {
@@ -437,6 +490,81 @@ void drawStar(int x, int y, uint16_t c) {
   g->fillRect(x - 1, y - 6, 3, 12, c);
 }
 
+// ---- Batteria: indicatore, allarme e fine carica ----
+uint32_t batAlertUntil = 0, batFullUntil = 0;  // animazioni "batteria scarica" / "carica completa"
+const int BAT_LOW_PCT = 15;
+
+bool batLowNow() {
+  int bp = batPercent();
+  return bp >= 0 && bp <= BAT_LOW_PCT && !usbPresent() && !batCharging();
+}
+
+// controlla i cambi di stato della batteria e fa partire le animazioni (una volta sola per evento)
+void batEvents(uint32_t now) {
+  static int prevPct = -1;
+  static bool wasCharging = false, fullDone = false;
+  int bp = batPercent();
+  if (bp < 0) return;
+  bool chg = batCharging(), usb = usbPresent();
+  // scarica: attraversa il 15% e il 5%
+  if (!usb && prevPct >= 0 && ((prevPct > BAT_LOW_PCT && bp <= BAT_LOW_PCT) || (prevPct > 5 && bp <= 5))) {
+    batAlertUntil = now + 5000;
+    lastTouch = now;
+    sfxPlay(SFX_ERROR);
+    if (state == S_SLEEP) setState(S_IDLE, "");
+  }
+  // carica: finita quando smette di caricare con l'USB collegato (o arriva al 100%)
+  if (!usb || bp < 90) fullDone = false;
+  if (usb && !fullDone && ((wasCharging && !chg && bp >= 90) || bp >= 100)) {
+    fullDone = true;
+    batFullUntil = now + 6000;
+    lastTouch = now;
+    sfxPlay(SFX_DONE);
+    if (state == S_SLEEP) setState(S_IDLE, "");
+  }
+  wasCharging = chg;
+  prevPct = bp;
+}
+
+// icona batteria di larghezza w (altezza ~ w/2): riempimento e colore secondo il livello
+void drawBatteryIcon(int x, int y, int w, int pct, bool charging, bool lowBlink) {
+  int h = w / 2 + 2;
+  uint16_t col = pct <= BAT_LOW_PCT ? RGB565(255, 90, 80) : pct <= 35 ? RGB565(255, 190, 70) : RGB565(110, 220, 150);
+  if (lowBlink && (millis() / 400) % 2) col = RGB565(90, 30, 30);
+  uint16_t edge = RGB565(190, 195, 210);
+  g->drawRoundRect(x, y, w, h, 3, edge);
+  g->fillRect(x + w, y + h / 3, 3, h - 2 * (h / 3), edge);  // polo positivo
+  int fw = (w - 6) * constrain(pct, 0, 100) / 100;
+  if (fw > 0) g->fillRect(x + 3, y + 3, fw, h - 6, col);
+  if (charging) {  // fulmine
+    int bx = x + w / 2, by = y + 2;
+    uint16_t bc = RGB565(255, 255, 255);
+    g->fillTriangle(bx + 2, by, bx - 4, by + h / 2, bx + 1, by + h / 2, bc);
+    g->fillTriangle(bx - 2, by + h - 4, bx + 4, by + h / 2 - 1, bx - 1, by + h / 2 - 1, bc);
+  }
+}
+
+void centerTextAt(const char *s, int cx, int y, uint8_t size, uint16_t color) {
+  g->setTextSize(size);
+  g->setTextColor(color);
+  int16_t x1, y1;
+  uint16_t w, h;
+  g->getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  g->setCursor(cx - (int)w / 2, y);
+  g->print(s);
+}
+
+// indicatore fisso nella schermata di Clawd (a destra dell'orologio)
+void drawBatteryIndicator() {
+  int bp = batPercent();
+  if (bp < 0) return;
+  bool low = bp <= BAT_LOW_PCT && !usbPresent();
+  drawBatteryIcon(CX + 78, 62, 36, bp, batCharging() || usbPresent(), low);
+  char b[8];
+  snprintf(b, sizeof(b), "%d%%", bp);
+  centerTextAt(b, CX + 96, 86, 2, low ? RGB565(255, 110, 100) : RGB565(150, 160, 185));
+}
+
 void drawTopRow(uint32_t t) {
   char buf[24];
   if (msgUnread) g->fillCircle(CX + 90, 28, 6, RGB565(255, 160, 80));  // messaggio non letto
@@ -558,7 +686,7 @@ void drawHeart(int x, int y, int s, uint16_t c) {
 void drawClawdPage() {
   uint32_t t = millis();
   float ts = t / 1000.0f;
-  float since = (t - stateSince) / 1000.0f;
+  float since = (ago(t, stateSince)) / 1000.0f;
 
   uint16_t bg = RGB565_BLACK;
   if ((int32_t)(alarmUntil - t) > 0) {  // allarme usage: sfondo rosso pulsante
@@ -573,9 +701,9 @@ void drawClawdPage() {
   Pose p;
   bool blink = fmodf(ts, 4.2f) < 0.14f;
   bool night = isNight();
-  bool bored = state == S_IDLE && (t - lastEvent) > 60000 && !night;
-  bool full = uctx >= 90 && (state == S_IDLE || state == S_THINKING || state == S_WORKING);  // contesto quasi pieno
-  bool cold = state == S_IDLE && sessN > 0 && cacheRemaining(sess[0]) == 0;                  // cache prompt scaduta
+  bool bored = (state == S_IDLE && (ago(t, lastEvent)) > 60000 && !night) || demoOn(DM_BORED);
+  bool full = (uctx >= 90 && (state == S_IDLE || state == S_THINKING || state == S_WORKING)) || demoOn(DM_FULL);  // contesto quasi pieno
+  bool cold = (state == S_IDLE && sessN > 0 && cacheRemaining(sess[0]) == 0) || demoOn(DM_COLD);                  // cache prompt scaduta
 
   switch (state) {
     case S_IDLE: {
@@ -660,12 +788,19 @@ void drawClawdPage() {
   }
 
   // stanco se l'usage e' quasi al limite
-  bool tired = (u5 >= 85 || u7 >= 92) &&
+  bool tired = demoOn(DM_TIRED) || (u5 >= 85 || u7 >= 92) &&
                (state == S_IDLE || state == S_THINKING || state == S_WORKING);
   if (tired) {
     p.openK *= 0.6f;
     p.legAmp *= 0.5f;
     p.dy += 3;
+  }
+  bool batLow = (batLowNow() && (state == S_IDLE || state == S_THINKING || state == S_WORKING)) || demoOn(DM_LOWBAT);
+  if (batLow) {  // batteria scarica: si muove piano
+    p.openK *= 0.55f;
+    p.legAmp *= 0.3f;
+    p.dy += 4;
+    p.dx *= 0.4f;
   }
   if (full) p.puff = 10 + (int)(3 * sinf(ts * 3));
   if (cold) p.dx += 2 * sinf(ts * 45);  // trema dal freddo
@@ -705,8 +840,25 @@ void drawClawdPage() {
     p.dy = -24 * fabsf(sinf(rsince * 8)) * (1.0f - rsince / 4.5f);
     p.armL = p.armR = 0.9f + 0.1f * sinf(ts * 16);
   }
+  // batteria: fine carica (festa) e allarme scarica (si accascia, sudore)
+  bool batFullOn = !dizzy && !lvlUp && !uAlarm && !uReset && (int32_t)(batFullUntil - t) > 0;
+  bool batAlertOn = !dizzy && !lvlUp && !uAlarm && !uReset && !batFullOn && (int32_t)(batAlertUntil - t) > 0;
+  float bsince = 6.0f - (float)(int32_t)(batFullUntil - t) / 1000.0f;
+  if (batFullOn) {
+    p = Pose();
+    p.eye = EYE_HAPPY;
+    p.dy = -26 * fabsf(sinf(bsince * 7)) * (1.0f - bsince / 6.0f * 0.6f);
+    p.armL = p.armR = 0.9f + 0.1f * sinf(ts * 16);
+  } else if (batAlertOn) {
+    p = Pose();
+    p.openK = 0.55f;
+    p.squash = 14;
+    p.dx = 4 * sinf(ts * 22);
+    p.dy = 4;
+    p.armL = p.armR = -0.35f;
+  }
   // eventi una tantum: commit, push, test ok, compattazione (il test fallito usa la faccia di errore)
-  bool fxOn = !dizzy && !lvlUp && !uAlarm && !uReset && fxKind != FX_NONE && (int32_t)(fxUntil - t) > 0;
+  bool fxOn = !dizzy && !lvlUp && !uAlarm && !uReset && !batFullOn && !batAlertOn && fxKind != FX_NONE && (int32_t)(fxUntil - t) > 0;
   float fsince = (t - fxStart) / 1000.0f;
   if (fxOn) {
     p = Pose();
@@ -734,7 +886,7 @@ void drawClawdPage() {
         break;
     }
   }
-  bool busy = dizzy || lvlUp || uAlarm || uReset || fxOn;
+  bool busy = dizzy || lvlUp || uAlarm || uReset || fxOn || batFullOn || batAlertOn;
 
   // tocchi ripetuti: prima ride, poi si infastidisce
   bool annoyed = !busy && (int32_t)(annoyUntil - t) > 0;
@@ -793,6 +945,19 @@ void drawClawdPage() {
     }
   }
   if (lvlUp) drawConfetti(lvlSince);
+  if (batFullOn) {
+    drawConfetti(bsince);
+    drawBatteryIcon(cx - 28, BODY_TOP - 74, 56, 100, true, false);
+    for (int i = 0; i < 4; i++) {
+      float k = 0.4f + 0.6f * fabsf(sinf(ts * 4 + i * 1.7f));
+      drawStar(cx - 90 + i * 60, BODY_TOP - 40 - (i % 2) * 24, scaled(255, 240, 160, k));
+    }
+  }
+  if (batAlertOn) {
+    drawBatteryIcon(cx - 28, BODY_TOP - 74, 56, batPercent() < 0 ? 0 : batPercent(), false, true);
+    drawSweat(cx + 86, BODY_TOP + 8 + (int)p.dy, ts);
+  }
+  if (batLow && !batAlertOn) drawSweat(cx + 86, BODY_TOP + 8 + (int)p.dy, ts);
   if (uReset) drawConfetti(rsince);
   if (uAlarm) {
     drawSweat(cx + 86, BODY_TOP + 8 + (int)p.dy, ts);
@@ -888,19 +1053,21 @@ void drawClawdPage() {
   }
 
   // --- testi ---
-  bool overlay = dizzy || lvlUp || uAlarm || uReset || fxOn || annoyed || laugh || midnight;
+  bool overlay = dizzy || lvlUp || uAlarm || uReset || fxOn || annoyed || laugh || midnight || batFullOn || batAlertOn;
   if (!overlay) switch (state) {
     case S_IDLE:
       if (clockText[0]) centerText(clockText, 62, 4, RGB565(150, 170, 200));
-      if (full) {
+      if (batLow) {
+        centerText("Batteria scarica", 372, 2, RGB565(255, 110, 100));
+      } else if (full) {
         centerText("Memoria piena", 372, 2, RGB565(255, 130, 110));
       } else if (tired) {
         char b2[28];
-        snprintf(b2, sizeof(b2), "Stanco... usage %d%%", u5 >= 85 ? u5 : u7);
+        snprintf(b2, sizeof(b2), "Stanco... usage %d%%", demoOn(DM_TIRED) ? 88 : (u5 >= 85 ? u5 : u7));
         centerText(b2, 372, 2, RGB565(150, 170, 210));
       } else if (cold) {
         centerText("Cache fredda", 372, 2, RGB565(140, 190, 255));
-      } else if (night) {
+      } else if (night && !demoOn(DM_BORED)) {
         centerText("Buonanotte", 372, 3, RGB565(120, 130, 170));
       } else if (bored) {
         centerText("Mi annoio...", 372, 2, RGB565(130, 140, 165));
@@ -936,7 +1103,11 @@ void drawClawdPage() {
       break;
   }
   if (dizzy) centerText("Che giramenti!", 372, 2, RGB565(255, 220, 100));
-  else if (uAlarm) {
+  else if (batFullOn) centerText("Carica completa!", 372, 3, RGB565(110, 230, 150));
+  else if (batAlertOn) {
+    centerText("Batteria scarica!", 372, 3, RGB565(255, 110, 100));
+    centerText("Collegami al cavo", 404, 2, RGB565(200, 140, 130));
+  } else if (uAlarm) {
     char b4[24];
     snprintf(b4, sizeof(b4), "Usage al %d%%!", alarmPct);
     centerText(b4, 372, 3, RGB565(255, 110, 100));
@@ -965,6 +1136,7 @@ void drawClawdPage() {
   }
   if ((int32_t)(toastUntil - t) > 0) centerText(toast, 330, 2, RGB565(255, 230, 140));
   drawTopRow(t);
+  if (!batFullOn && !batAlertOn) drawBatteryIndicator();
 }
 
 // ---- Pagina Sessioni ----
@@ -1217,31 +1389,41 @@ void saveStyle() {
   pf.end();
 }
 
+// bottoni della pagina Stile (2x2, sotto Clawd)
+static const int STY_X[2] = { -148, 6 };
+static const int STY_Y[2] = { 290, 352 };
+const int STY_W = 142, STY_H = 54;
+uint32_t styFlashUntil = 0;
+int styFlashId = -1;
+
 void drawStylePage() {
   float ts = millis() / 1000.0f;
+  uint32_t t = millis();
   g->fillScreen(RGB565_BLACK);
-  centerText("Stile", 40, 3, RGB565(200, 205, 220));
   Pose p;
-  p.dy = 2 * sinf(ts * 2.2f);
+  p.dy = -62 + 2 * sinf(ts * 2.2f);
   p.armL = p.armR = 0.1f * sinf(ts * 2.2f);
   if (fmodf(ts, 4.2f) < 0.14f) p.openK = 0.1f;
   drawClawd(p);
-  char buf[32];
-  uint16_t dim = RGB565(150, 160, 185), val = RGB565(230, 232, 240);
-  const char *labels[4] = { "Colore", "Cappello", "Occhiali", "Suono" };
-  const char *vals[4] = { COLORS[styleColor].name, HAT_NAMES[styleHat], GLS_NAMES[styleGlasses], audioEnabled() ? "on" : "off" };
+  const char *labels[4] = { "COLORE", "CAPPELLO", "OCCHIALI", "SUONO" };
+  const char *vals[4] = { COLORS[styleColor].name, HAT_NAMES[styleHat], GLS_NAMES[styleGlasses], audioEnabled() ? "acceso" : "spento" };
   for (int i = 0; i < 4; i++) {
-    snprintf(buf, sizeof(buf), "%s: %s", labels[i], vals[i]);
+    int x = CX + STY_X[i & 1], y = STY_Y[i >> 1];
+    bool fl = (int32_t)(styFlashUntil - t) > 0 && styFlashId == i;
+    g->fillRoundRect(x, y, STY_W, STY_H, 14, fl ? RGB565(90, 100, 135) : RGB565(36, 42, 62));
+    g->setTextSize(1);
+    g->setTextColor(RGB565(130, 140, 165));
+    g->setCursor(x + 14, y + 9);
+    g->print(labels[i]);
     g->setTextSize(2);
-    g->setTextColor(i == 0 ? val : dim);
-    int16_t x1, y1;
-    uint16_t w, h;
-    g->getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
-    g->setCursor(CX - (int)w / 2, 346 + 22 * i);
-    g->setTextColor(val);
-    g->print(buf);
+    g->setTextColor(RGB565(235, 238, 248));
+    g->setCursor(x + 14, y + 26);
+    g->print(vals[i]);
+    if (i == 0) g->fillCircle(x + STY_W - 22, y + STY_H / 2, 10, COLORS[styleColor].c);  // anteprima del colore
   }
-  centerText("tocca una riga per cambiare", 426, 1, RGB565(90, 100, 120));
+  char lv[16];
+  snprintf(lv, sizeof(lv), "Livello %d", petLevel);
+  centerText(lv, 418, 1, RGB565(110, 120, 140));
 }
 
 // ---- Animazione di avvio: Clawd "nasce" ----
@@ -1307,18 +1489,261 @@ void drawInfoPage() {
   statusDot(CX + 22, 218, "RTC", rtcPresent());
   statusDot(CX - 110, 246, "PMU", hwPmuOk());
   statusDot(CX + 22, 246, "PSRAM", ESP.getPsramSize() > 0);
+  statusDot(CX - 110, 274, "BLE", bleConnected());  // verde = connesso e associato
+  statusDot(CX + 22, 274, "USB", usbPresent());
   snprintf(buf, sizeof(buf), "RAM %uK PSRAM %uK", (unsigned)(ESP.getFreeHeap() / 1024), (unsigned)(ESP.getFreePsram() / 1024));
-  centerText(buf, 284, 2, RGB565(130, 140, 165));
+  centerText(buf, 310, 2, RGB565(130, 140, 165));
   int bp = batPercent();
   if (bp >= 0) {
     snprintf(buf, sizeof(buf), "Batt %d%%%s", bp, batCharging() ? " carica" : usbPresent() ? " USB" : "");
-    centerText(buf, 312, 2, RGB565(170, 175, 195));
+    centerText(buf, 336, 2, RGB565(170, 175, 195));
   }
-  centerText(__DATE__, 346, 1, RGB565(90, 100, 120));
+  centerText(__DATE__, 366, 1, RGB565(90, 100, 120));
+}
+
+// ---- Menu impostazioni (si apre tenendo premuto BOOT) ----
+int setFocus = 0;  // controllo evidenziato (tasti fisici): 0 volume, 1 luminosita', 2 standby, 3 associa, 4 dimentica, 5 spegni, 6 esci
+uint32_t setLastInput = 0;
+uint32_t btnFlashUntil = 0;  // feedback visivo del bottone premuto
+int btnFlashId = -1;
+const int SET_FOCUS_N = 7;
+static const uint16_t STANDBY_STEPS[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
+
+void saveBrightness() {
+  Preferences pf;
+  pf.begin("claudebuddy", false);
+  pf.putUChar("bri", userBrightness);
+  pf.end();
+}
+
+void saveAutoStandby() {
+  Preferences pf;
+  pf.begin("claudebuddy", false);
+  pf.putUShort("asb", autoStandbyMin);
+  pf.end();
+}
+
+int standbyIndex() {
+  int n = sizeof(STANDBY_STEPS) / sizeof(STANDBY_STEPS[0]);
+  for (int i = 0; i < n; i++)
+    if (STANDBY_STEPS[i] == autoStandbyMin) return i;
+  return 0;
+}
+
+void openSettings() {
+  settingsOpen = true;
+  setFocus = 0;
+  setLastInput = millis();
+  lastTouch = setLastInput;
+  sfxPlay(SFX_TAP);
+}
+
+void closeSettings() {
+  settingsOpen = false;
+  lastTouch = millis();
+  sfxPlay(SFX_TAP);
+}
+
+// azioni dei controlli; d = +1/-1 per i valori, wrap = giro completo (tasti fisici)
+void actVolume(int d, bool wrap) {
+  int v = audioVolume() + d * 10;
+  if (v > 100) v = wrap ? 0 : 100;
+  if (v < 0) v = 0;
+  audioSetVolume(v);
+  sfxPlay(SFX_TAP);
+}
+void actBright(int d, bool wrap) {
+  int v = userBrightness + d * 25;
+  if (v > 255) v = wrap ? 20 : 255;
+  if (v < 20) v = 20;
+  userBrightness = (uint8_t)v;
+  saveBrightness();
+}
+void actStandby(int d, bool wrap) {
+  int n = sizeof(STANDBY_STEPS) / sizeof(STANDBY_STEPS[0]);
+  int idx = standbyIndex() + d;
+  if (idx >= n) idx = wrap ? 0 : n - 1;
+  if (idx < 0) idx = 0;
+  autoStandbyMin = STANDBY_STEPS[idx];
+  saveAutoStandby();
+  sfxPlay(SFX_TAP);
+}
+void actPair() {
+  if (blePairingOpen(nullptr)) bleSetPairing(false);
+  else {
+    bleSetPairing(true);
+    settingsOpen = false;  // si passa alla schermata di associazione
+  }
+  sfxPlay(SFX_TAP);
+}
+void actUnpair() {
+  bleUnpairAll();
+  showToast("PC dimenticati");
+  sfxPlay(SFX_DONE);
+}
+void actOff() {
+  settingsOpen = false;
+  powerOff();
+}
+
+// tasti fisici: attiva il controllo evidenziato
+void settingsActivate() {
+  setLastInput = millis();
+  lastTouch = setLastInput;
+  switch (setFocus) {
+    case 0: actVolume(1, true); break;
+    case 1: actBright(1, true); break;
+    case 2: actStandby(1, true); break;
+    case 3: actPair(); break;
+    case 4: actUnpair(); break;
+    case 5: actOff(); break;
+    default: closeSettings(); break;
+  }
+}
+
+// geometria
+static const int ST_ROW_Y[3] = { 66, 126, 186 };
+const int ST_ROW_H = 52;
+const int ST_MINUS_X = -4, ST_PLUS_X = 106, ST_STEP_W = 46;  // relativi a CX
+static const int ST_BTN_Y[2] = { 258, 322 };
+const int ST_BTN_H = 56;
+
+static bool inRect(int px, int py, int x, int y, int w, int h, int pad = 6) {
+  return px >= x - pad && px <= x + w + pad && py >= y - pad && py <= y + h + pad;
+}
+
+void settingsTouch(int sx, int sy) {
+  setLastInput = millis();
+  lastTouch = setLastInput;
+  // righe con - / +
+  for (int r = 0; r < 3; r++) {
+    int y = ST_ROW_Y[r];
+    int dir = 0;
+    if (inRect(sx, sy, CX + ST_MINUS_X, y, ST_STEP_W, ST_ROW_H)) dir = -1;
+    else if (inRect(sx, sy, CX + ST_PLUS_X, y, ST_STEP_W, ST_ROW_H)) dir = 1;
+    if (dir) {
+      setFocus = r;
+      btnFlashId = r * 2 + (dir > 0);
+      btnFlashUntil = millis() + 150;
+      if (r == 0) actVolume(dir, false);
+      else if (r == 1) actBright(dir, false);
+      else actStandby(dir, false);
+      return;
+    }
+  }
+  // bottoni 2x2
+  for (int b = 0; b < 4; b++) {
+    int x = CX + ((b & 1) ? 6 : -150), y = ST_BTN_Y[b >> 1];
+    if (inRect(sx, sy, x, y, 144, ST_BTN_H)) {
+      setFocus = 3 + b;
+      btnFlashId = 6 + b;
+      btnFlashUntil = millis() + 150;
+      settingsActivate();
+      return;
+    }
+  }
+  if (sy > 395) closeSettings();  // fascia in basso = chiudi
+}
+
+// bottone arrotondato con etichetta centrata
+static void drawButton(int x, int y, int w, int h, const char *label, uint16_t fill, uint16_t txt, bool focus, bool flash, uint8_t size = 2) {
+  g->fillRoundRect(x, y, w, h, 14, flash ? RGB565(90, 100, 135) : fill);
+  if (focus) g->drawRoundRect(x - 2, y - 2, w + 4, h + 4, 16, RGB565(255, 220, 120));
+  g->setTextSize(size);
+  g->setTextColor(txt);
+  int16_t x1, y1;
+  uint16_t tw, th;
+  g->getTextBounds(label, 0, 0, &x1, &y1, &tw, &th);
+  g->setCursor(x + (w - (int)tw) / 2, y + (h - (int)th) / 2);
+  g->print(label);
+}
+
+void drawSettingsPage() {
+  g->fillScreen(RGB565_BLACK);
+  centerText("Impostazioni", 24, 2, RGB565(200, 205, 220));
+  uint32_t t = millis();
+  bool fl = (int32_t)(btnFlashUntil - t) > 0;
+  const uint16_t bg = RGB565(36, 42, 62), bgStep = RGB565(48, 56, 82);
+  char v[16];
+  const char *labels[3] = { "Volume", "Luminosita'", "Standby" };
+  for (int r = 0; r < 3; r++) {
+    int y = ST_ROW_Y[r];
+    bool foc = setFocus == r;
+    g->fillRoundRect(CX - 150, y, 300, ST_ROW_H, 14, RGB565(20, 24, 36));
+    if (foc) g->drawRoundRect(CX - 152, y - 2, 304, ST_ROW_H + 4, 16, RGB565(255, 220, 120));
+    g->setTextSize(2);
+    g->setTextColor(RGB565(170, 178, 200));
+    g->setCursor(CX - 140, y + (ST_ROW_H - 14) / 2);
+    g->print(labels[r]);
+    if (r == 0) {
+      if (audioVolume() == 0) strcpy(v, "muto");
+      else snprintf(v, sizeof(v), "%u%%", (unsigned)audioVolume());
+    } else if (r == 1) {
+      snprintf(v, sizeof(v), "%d%%", (int)userBrightness * 100 / 255);
+    } else {
+      if (autoStandbyMin == 0) strcpy(v, "mai");
+      else snprintf(v, sizeof(v), "%um", (unsigned)autoStandbyMin);
+    }
+    drawButton(CX + ST_MINUS_X, y + 3, ST_STEP_W, ST_ROW_H - 6, "-", bgStep, RGB565(255, 220, 120), false, fl && btnFlashId == r * 2, 3);
+    drawButton(CX + ST_PLUS_X, y + 3, ST_STEP_W, ST_ROW_H - 6, "+", bgStep, RGB565(255, 220, 120), false, fl && btnFlashId == r * 2 + 1, 3);
+    centerTextAt(v, CX + 70 + 0, y + (ST_ROW_H - 14) / 2, 2, RGB565(235, 238, 248));
+  }
+  bool pairOpen = blePairingOpen(nullptr);
+  drawButton(CX - 150, ST_BTN_Y[0], 144, ST_BTN_H, pairOpen ? "Annulla" : "Associa PC", pairOpen ? RGB565(70, 90, 50) : RGB565(34, 70, 110), RGB565(235, 238, 248), setFocus == 3, fl && btnFlashId == 6);
+  drawButton(CX + 6, ST_BTN_Y[0], 144, ST_BTN_H, "Dimentica", bg, RGB565(235, 238, 248), setFocus == 4, fl && btnFlashId == 7);
+  drawButton(CX - 150, ST_BTN_Y[1], 144, ST_BTN_H, "Spegni", RGB565(100, 36, 36), RGB565(255, 200, 190), setFocus == 5, fl && btnFlashId == 8);
+  drawButton(CX + 6, ST_BTN_Y[1], 144, ST_BTN_H, "Esci", bg, RGB565(235, 238, 248), setFocus == 6, fl && btnFlashId == 9);
+  if ((int32_t)(toastUntil - t) > 0) centerText(toast, 400, 2, RGB565(255, 230, 140));
+  else centerText("BOOT: scorri  POWER: ok", 408, 1, RGB565(110, 120, 140));
+  if (canvas) canvas->flush();
+}
+
+// ---- Schermata di associazione: attesa del PC (il codice compare dopo) ----
+void drawPairWaitPage() {
+  g->fillScreen(RGB565_BLACK);
+  uint32_t left = 0;
+  blePairingOpen(&left);
+  centerText("Associazione", 70, 3, RGB565(200, 205, 220));
+  centerText("Sul PC apri", 130, 2, RGB565(150, 160, 185));
+  centerText("Bluetooth > Aggiungi", 160, 2, RGB565(235, 238, 248));
+  centerText("dispositivo", 186, 2, RGB565(235, 238, 248));
+  centerText("e scegli", 220, 2, RGB565(150, 160, 185));
+  centerText("Claude Buddy", 250, 3, RGB565(255, 200, 90));
+  char b[12];
+  snprintf(b, sizeof(b), "%u:%02u", (unsigned)(left / 60000), (unsigned)((left / 1000) % 60));
+  centerText(b, 306, 3, RGB565(120, 130, 150));
+  drawButton(CX - 80, 354, 160, 52, "Annulla", RGB565(60, 40, 40), RGB565(255, 200, 190), false, false);
+  if (canvas) canvas->flush();
+}
+
+// ---- Associazione BLE: codice da digitare sul PC ----
+void drawPairingPage(uint32_t code) {
+  g->fillScreen(RGB565_BLACK);
+  centerText("Associazione", 90, 3, RGB565(200, 205, 220));
+  centerText("Digita questo codice", 150, 2, RGB565(130, 140, 165));
+  centerText("sul PC", 176, 2, RGB565(130, 140, 165));
+  char buf[10];
+  snprintf(buf, sizeof(buf), "%06u", (unsigned)code);
+  centerText(buf, 240, 6, RGB565(255, 200, 90));
+  centerText("Bluetooth > Aggiungi dispositivo", 350, 1, RGB565(90, 100, 120));
+  if (canvas) canvas->flush();
 }
 
 // ---- Cornice: pagina corrente + indicatore ----
 void drawFrame() {
+  uint32_t pk;
+  if (blePasskeyActive(&pk)) {
+    drawPairingPage(pk);
+    return;
+  }
+  if (blePairingOpen(nullptr)) {
+    drawPairWaitPage();
+    return;
+  }
+  if (settingsOpen) {
+    drawSettingsPage();
+    return;
+  }
   C_CLAWD = (COLORS[styleColor].lvl <= petLevel) ? COLORS[styleColor].c : COLORS[0].c;
   if ((int32_t)(bootEnd - millis()) > 0) {  // avvio: solo l'animazione
     drawBoot();
@@ -1340,10 +1765,6 @@ void drawFrame() {
     g->fillCircle(CX + (int)((i - (PG_COUNT - 1) / 2.0f) * 18), 440, i == page ? 4 : 2, i == page ? RGB565(210, 215, 230) : RGB565(70, 75, 90));
   if (canvas) canvas->flush();
 }
-
-// ---- Seriale ----
-char lineBuf[448];
-uint16_t lineLen = 0;
 
 bool startsWithCI(const char *s, const char *prefix) {
   while (*prefix) {
@@ -1461,7 +1882,22 @@ void parseMsg(const char *p) {
 void handleLine(const char *line) {
   while (*line == ' ') line++;
   if (!*line) return;
-  if (startsWithCI(line, "idle")) setState(S_IDLE, argOf(line, 4));
+  if (demoActive && (startsWithCI(line, "idle") || startsWithCI(line, "thinking") || startsWithCI(line, "working") ||
+                     startsWithCI(line, "attention") || startsWithCI(line, "done") || startsWithCI(line, "sleep") ||
+                     startsWithCI(line, "error") || startsWithCI(line, "usage") || startsWithCI(line, "fx")))
+    return;  // durante la demo il PC non cambia la scena
+  if (startsWithCI(line, "touchdebug")) touchDebug = atoi(argOf(line, 10)) != 0;
+  else if (startsWithCI(line, "unpair")) bleUnpairAll();
+  else if (startsWithCI(line, "standby")) enterStandby();
+  else if (startsWithCI(line, "wake")) exitStandby();
+  else if (startsWithCI(line, "off")) powerOff();
+  else if (startsWithCI(line, "autostandby")) {
+    autoStandbyMin = (uint16_t)constrain(atoi(argOf(line, 11)), 0, 600);
+    Preferences pf;
+    pf.begin("claudebuddy", false);
+    pf.putUShort("asb", autoStandbyMin);
+    pf.end();
+  } else if (startsWithCI(line, "idle")) setState(S_IDLE, argOf(line, 4));
   else if (startsWithCI(line, "thinking")) setState(S_THINKING, argOf(line, 8));
   else if (startsWithCI(line, "working")) setState(S_WORKING, argOf(line, 7));
   else if (startsWithCI(line, "attention")) setState(S_ATTENTION, argOf(line, 9));
@@ -1530,38 +1966,148 @@ void handleLine(const char *line) {
   }
 }
 
-void pollSerial() {
-  while (Serial.available()) {
-    char c = (char)Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (lineLen) {
-        lineBuf[lineLen] = 0;
-        handleLine(lineBuf);
-        lastDataAt = millis();
-        lineLen = 0;
-      }
-    } else if (lineLen < sizeof(lineBuf) - 1) {
-      lineBuf[lineLen++] = c;
-    } else {
-      lineLen = 0;  // riga troppo lunga: scarta
+void feedLine(LineIn &in, char c) {
+  if (c == '\n' || c == '\r') {
+    if (in.len) {
+      in.buf[in.len] = 0;
+      if (touchDebug) Serial.printf("L %.24s\n", in.buf);
+      handleLine(in.buf);
+      if (touchDebug) Serial.printf("  page=%d\n", (int)page);
+      lastDataAt = millis();
+      in.len = 0;
     }
+  } else if (in.len < sizeof(in.buf) - 1) {
+    in.buf[in.len++] = c;
+  } else {
+    in.len = 0;  // riga troppo lunga: scarta
   }
 }
 
+void pollSerial() {
+  while (Serial.available()) feedLine(serIn, (char)Serial.read());
+  int b;
+  for (int n = 0; n < 1024 && (b = bleRead()) >= 0; n++) feedLine(bleIn, (char)b);
+}
+
 // ---- Tasto BOOT: demo degli stati ----
+// ---- Demo animazioni: BOOT breve le scorre tutte ----
+static const char *const DEMO_NAMES[] = {
+  "In attesa", "Penso", "Lavoro", "Errore", "Serve te", "Fatto", "Dorme", "Annoiato", "Stanco", "Memoria piena",
+  "Cache fredda", "Batt. scarica", "Allarme batt.", "Carica completa", "Commit", "Push", "Test ok", "Compattazione",
+  "Livello su", "Allarme usage", "Limite azzerato", "Carezza", "Risata", "Infastidito", "Stordito", "Mezzanotte"
+};
+const int DEMO_N = sizeof(DEMO_NAMES) / sizeof(DEMO_NAMES[0]);
+// ripetizione automatica (ms) per gli effetti a tempo, 0 = resta finche' non premi
+static const uint16_t DEMO_PERIOD[DEMO_N] = {
+  0, 0, 0, 2800, 0, 4500, 0, 0, 0, 0,
+  0, 0, 6500, 7500, 4500, 4800, 4500, 4500,
+  5000, 5500, 6000, 3200, 3500, 4000, 4500, 8500
+};
+
+void demoApply(int i) {
+  uint32_t now = millis();
+  dizzyUntil = lvlUpUntil = alarmUntil = resetUntil = 0;
+  annoyUntil = laughUntil = midnightUntil = petUntil = 0;
+  batAlertUntil = batFullUntil = 0;
+  fxUntil = 0;
+  fxKind = FX_NONE;
+  demoKind = DM_NONE;
+  page = PG_CLAWD;
+  lastTouch = now;
+  lastEvent = now;
+  setState(S_IDLE, "");
+  switch (i) {
+    case 1: setState(S_THINKING, ""); break;
+    case 2: setState(S_WORKING, "Bash"); break;
+    case 3: setState(S_ERROR, ""); break;
+    case 4: setState(S_ATTENTION, "Permesso: Bash"); break;
+    case 5: setState(S_DONE, ""); break;
+    case 6: setState(S_SLEEP, ""); break;
+    case 7: demoKind = DM_BORED; break;
+    case 8: demoKind = DM_TIRED; break;
+    case 9: demoKind = DM_FULL; break;
+    case 10: demoKind = DM_COLD; break;
+    case 11: demoKind = DM_LOWBAT; break;
+    case 12: batAlertUntil = now + 5000; sfxPlay(SFX_ERROR); break;
+    case 13: batFullUntil = now + 6000; sfxPlay(SFX_DONE); break;
+    case 14: startFx(FX_COMMIT); break;
+    case 15: startFx(FX_PUSH); break;
+    case 16: startFx(FX_TESTOK); break;
+    case 17: startFx(FX_COMPACT); break;
+    case 18: lvlUpUntil = now + 3500; sfxPlay(SFX_LEVEL); break;
+    case 19: alarmPct = 92; alarmUntil = now + 4000; sfxPlay(SFX_ALERT); break;
+    case 20: resetUntil = now + 4500; sfxPlay(SFX_LEVEL); break;
+    case 21: petUntil = now + 1600; sfxPlay(SFX_HEART); break;
+    case 22: laughUntil = now + 2000; sfxPlay(SFX_HEART); break;
+    case 23: annoyUntil = now + 2500; sfxPlay(SFX_ERROR); break;
+    case 24: dizzyUntil = now + 3000; sfxPlay(SFX_DIZZY); break;
+    case 25: midnightUntil = now + 7000; sfxPlay(SFX_HEART); break;
+    default: break;
+  }
+  char b[24];
+  snprintf(b, sizeof(b), "%d/%d %s", i + 1, DEMO_N, DEMO_NAMES[i]);
+  showToast(b);
+  demoRetrig = now + (DEMO_PERIOD[i] ? DEMO_PERIOD[i] : 0x7fffffff);
+}
+
+void demoNext() {
+  demoActive = true;
+  demoIdx = (demoIdx + 1) % DEMO_N;
+  demoEnds = millis() + 60000;
+  demoApply(demoIdx);
+}
+
+// da chiamare nel loop: ripete gli effetti a tempo e chiude la demo dopo un minuto di inattivita'
+void demoService(uint32_t now) {
+  if (!demoActive) return;
+  if ((int32_t)(now - demoEnds) > 0) {
+    demoActive = false;
+    demoKind = DM_NONE;
+    return;
+  }
+  if (demoRetrig != 0x7fffffffu && (int32_t)(now - demoRetrig) >= 0) demoApply(demoIdx);
+  else lastTouch = now;  // niente standby/riposo durante la demo
+}
+
 void pollButton() {
   static bool prev = true;
   static uint32_t lastPress = 0;
+  static uint32_t downAt = 0;
+  static bool longDone = false;
   bool now = digitalRead(BOOT_PIN);
-  if (prev && !now && millis() - lastPress > 250) {
-    lastPress = millis();
-    static const State order[] = { S_IDLE, S_THINKING, S_WORKING, S_ERROR, S_ATTENTION, S_DONE, S_SLEEP };
-    const int n = sizeof(order) / sizeof(order[0]);
-    int idx = 0;
-    for (int i = 0; i < n; i++)
-      if (order[i] == state) idx = i;
-    State next = order[(idx + 1) % n];
-    setState(next, next == S_WORKING ? "Bash" : "");
+  uint32_t ms = millis();
+  if (prev && !now) {
+    downAt = ms;
+    longDone = false;
+  }
+  if (!now && !longDone && ms - downAt >= 700) {  // pressione lunga: menu impostazioni
+    longDone = true;
+    if (standby) exitStandby();
+    else if (settingsOpen) closeSettings();
+    else openSettings();
+  }
+  bool released = now && !prev && !longDone && ms - downAt > 40;
+  if (released && ms - lastPress > 250) {
+    lastPress = ms;
+    if (standby) {
+      exitStandby();
+      prev = now;
+      return;
+    }
+    if (blePairingOpen(nullptr)) {  // BOOT annulla l'associazione
+      bleSetPairing(false);
+      prev = now;
+      return;
+    }
+    if (settingsOpen) {
+      setFocus = (setFocus + 1) % SET_FOCUS_N;
+      setLastInput = ms;
+      lastTouch = ms;
+      sfxPlay(SFX_TAP);
+      prev = now;
+      return;
+    }
+    demoNext();  // BOOT breve: prossima animazione di Clawd
     lastTouch = millis();
   }
   prev = now;
@@ -1626,14 +2172,24 @@ void startFx(uint8_t kind) {
   fxUntil = now + (kind == FX_PUSH ? 3300 : 3000);
   sfxPlay(kind == FX_PUSH ? SFX_LEVEL : kind == FX_COMPACT ? SFX_TAP : kind == FX_COMMIT ? SFX_HEART : SFX_DONE);
   if (state == S_SLEEP) setState(S_IDLE, "");
-  if (now - lastTouch > 15000) page = PG_CLAWD;  // se stai leggendo qualcosa non ti sposta
+  if (ago(now, lastTouch) > 15000) page = PG_CLAWD;  // se stai leggendo qualcosa non ti sposta
 }
 
 void onGesture(int dx, int dy, uint32_t dur, int sx, int sy) {
   uint32_t now = millis();
+  if (touchDebug) Serial.printf("G dx=%d dy=%d dur=%u sx=%d sy=%d page=%d\n", dx, dy, (unsigned)dur, sx, sy, (int)page);
+  if (blePairingOpen(nullptr)) {  // schermata di associazione: un tocco annulla
+    if (abs(dx) < 30 && abs(dy) < 30) bleSetPairing(false);
+    return;
+  }
+  if (settingsOpen) {
+    if (abs(dx) < 30 && abs(dy) < 30) settingsTouch(sx, sy);
+    return;
+  }
   if (abs(dx) > 60 && abs(dx) > abs(dy) * 3 / 2) {
     bool next = (dx < 0) != (SWIPE_INVERT != 0);
     page = (page + (next ? 1 : PG_COUNT - 1)) % PG_COUNT;
+    if (touchDebug) Serial.printf("PAGE %d dx=%d dy=%d\n", (int)page, dx, dy);
     sfxPlay(SFX_TAP);
   } else if (page == PG_MSG && abs(dy) > 50 && abs(dy) > abs(dx) * 3 / 2) {
     msgScroll += (dy < 0) ? 5 : -5;  // trascina verso l'alto = scorre avanti (il limite lo applica il disegno)
@@ -1663,14 +2219,18 @@ void onGesture(int dx, int dy, uint32_t dur, int sx, int sy) {
         }
       }
     } else if (page == PG_STYLE) {
-      int row = (sy - 340) / 22;  // le 4 righe di testo sotto Clawd
-      if (sy >= 340 && row >= 0 && row < 4) {
-        if (row == 0) cycleColor();
-        else if (row == 1) cycleHat();
-        else if (row == 2) cycleGlasses();
-        else audioSetEnabled(!audioEnabled());
-        saveStyle();
-        sfxPlay(SFX_TAP);
+      for (int i = 0; i < 4; i++) {
+        if (inRect(sx, sy, CX + STY_X[i & 1], STY_Y[i >> 1], STY_W, STY_H)) {
+          if (i == 0) cycleColor();
+          else if (i == 1) cycleHat();
+          else if (i == 2) cycleGlasses();
+          else audioSetEnabled(!audioEnabled());
+          styFlashId = i;
+          styFlashUntil = millis() + 150;
+          saveStyle();
+          sfxPlay(SFX_TAP);
+          break;
+        }
       }
     } else if (page == PG_TIMER) {
       if (longPress) {  // reset
@@ -1702,6 +2262,10 @@ void pollTouch() {
   if (Wire.endTransmission() != 0) return;
   int16_t x, y;
   bool pressed = touch.getPoint(&x, &y, 1) > 0;
+  if (touchDebug) {
+    if (pressed) Serial.printf("T %u %d %d\n", (unsigned)now, (int)x, (int)y);
+    else Serial.printf("U %u was=%d dx=%d dy=%d\n", (unsigned)now, (int)wasPressed, (int)(xl - x0), (int)(yl - y0));
+  }
   if (pressed) {
     lastTouch = now;
     if (!wasPressed) { x0 = xl = x; y0 = yl = y; t0 = now; }
@@ -1718,6 +2282,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);      // niente blocchi se nessuno ascolta
   pinMode(BOOT_PIN, INPUT_PULLUP);
+  bleBegin();
 
   if (!panel->begin()) {
     // senza schermo non c'e' molto da fare: continua comunque a leggere la seriale
@@ -1742,6 +2307,8 @@ void setup() {
     styleColor = pf.getUChar("col", 0) % N_COLORS;
     styleHat = pf.getUChar("hat", 3) % 4;
     styleGlasses = pf.getUChar("gls", 2) % 3;
+    autoStandbyMin = pf.getUShort("asb", 10);
+    userBrightness = pf.getUChar("bri", 120);
     pf.end();
   }
   uint32_t r = rtcGet();  // ora dell'RTC (resta giusta anche a PC spento)
@@ -1762,6 +2329,28 @@ void loop() {
 
   pollSerial();
   pollButton();
+  bleService();
+
+  // tasto POWER: breve = standby / risveglio, lungo = spegnimento
+  PwrKey pk = pwrKeyPoll(now);
+  if (pk == PWR_LONG) powerOff();
+  else if (pk == PWR_SHORT) {
+    if (standby) exitStandby();
+    else if (settingsOpen) settingsActivate();
+    else if (blePairingOpen(nullptr)) bleSetPairing(false);
+    else enterStandby();
+  }
+  if (settingsOpen && millis() - setLastInput > 30000) settingsOpen = false;  // si chiude da solo
+
+  if (standby) {
+    // schermo spento: si resta in ascolto; serve-te sveglia lo schermo
+    if (state == S_ATTENTION || blePasskeyActive(nullptr)) exitStandby();
+    if (tmRunning) tmLast = now;  // il timer resta in pausa
+    batUpdate(now);
+    delay(30);
+    return;
+  }
+
   pollTouch();
 
   // scossa: Clawd si stordisce (e si sveglia)
@@ -1773,6 +2362,8 @@ void loop() {
   }
 
   batUpdate(now);
+  batEvents(now);
+  demoService(now);
 
   // orologio dal sistema, aggiornato una volta al secondo
   static uint32_t lastClock = 0;
@@ -1810,19 +2401,24 @@ void loop() {
   }
 
   // dopo un po' senza tocchi si torna a Clawd (tranne il timer in corso)
-  if (page != PG_CLAWD && !(page == PG_TIMER && tmRunning) && now - lastTouch > 45000) page = PG_CLAWD;
+  if (page != PG_CLAWD && !(page == PG_TIMER && tmRunning) && ago(now, lastTouch) > 45000) page = PG_CLAWD;
 
   // timeout automatici
-  if (state == S_DONE && now - stateSince > DONE_TO_IDLE_MS) setState(S_IDLE, "");
-  if (state == S_ERROR && now - stateSince > 3000) setState(S_THINKING, "");
-  if ((state == S_WORKING || state == S_THINKING) && now - lastEvent > WORKING_STALE_MS) setState(S_IDLE, "");
+  if (state == S_DONE && ago(now, stateSince) > DONE_TO_IDLE_MS) setState(S_IDLE, "");
+  if (state == S_ERROR && ago(now, stateSince) > 3000) setState(S_THINKING, "");
+  if ((state == S_WORKING || state == S_THINKING) && ago(now, lastEvent) > WORKING_STALE_MS) setState(S_IDLE, "");
   // di notte va a dormire presto; di giorno prima si annoia (vedi drawClawdPage)
   uint32_t sleepAfter = isNight() ? 20000UL : 150000UL;
-  if (state == S_IDLE && now - lastEvent > sleepAfter) state = S_SLEEP;  // senza azzerare lastEvent
+  if (state == S_IDLE && ago(now, lastEvent) > sleepAfter) state = S_SLEEP;  // senza azzerare lastEvent
+
+  // a batteria: dopo un po' a riposo e senza tocchi, standby automatico
+  if (autoStandbyMin && !usbPresent() && batPercent() >= 0 && !tmRunning && (state == S_IDLE || state == S_SLEEP) &&
+      ago(now, lastTouch) > autoStandbyMin * 60000UL && ago(now, lastEvent) > autoStandbyMin * 60000UL)
+    enterStandby();
 
   // luminosita': bassa in sleep (protegge l'AMOLED)
   // (un tocco recente la alza per qualche secondo)
-  bool dim = state == S_SLEEP && (lastTouch == 0 || now - lastTouch > 20000);
+  bool dim = state == S_SLEEP && (lastTouch == 0 || ago(now, lastTouch) > 20000);
   setBrightnessSmooth(dim ? 6 : userBrightness);
 
   if (now - lastFrame >= 33) {  // ~30 fps
