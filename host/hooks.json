@@ -1,0 +1,120 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" hook"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "python -I \"/PERCORSO/DEL/REPO/host/buddy.py\" statusline"
+  }
+}

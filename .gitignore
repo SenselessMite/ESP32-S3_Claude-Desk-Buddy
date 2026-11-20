@@ -1,0 +1,13 @@
+# stato locale generato dagli hook (sessioni, messaggi, esperienza di Clawd)
+host/state/
+
+# configurazione locale della porta seriale (vedi host/port.example.txt)
+host/port.txt
+
+# Python / editor / build
+__pycache__/
+*.pyc
+*.bak
+*.bak[0-9]
+build/
+.vscode/
