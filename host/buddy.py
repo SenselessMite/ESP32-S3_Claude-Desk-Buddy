@@ -283,7 +283,7 @@ def pretty_message(msg):
     msg = str(msg or "")
     marker = "permission to use "
     if marker in msg:
-        return clean("Permesso: " + msg.split(marker, 1)[1].rstrip("."), 26)
+        return clean("@perm " + msg.split(marker, 1)[1].rstrip("."), 26)  # il firmware lo traduce
     return clean(msg, 26)
 
 

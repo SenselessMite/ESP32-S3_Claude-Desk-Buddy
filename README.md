@@ -11,7 +11,8 @@ Claude Code ──hook / statusLine──▶ host/buddy.py ──USB serial ─�
 ```
 
 Unofficial project, not affiliated with Anthropic (see [Trademarks and license](#trademarks-and-license)).
-The on-screen texts and the code comments are in Italian; the documentation is in English.
+The on-screen texts are available in **Italian, English, French, German and Spanish** (pick it in the
+settings menu); the code comments are in Italian and the documentation is in English.
 
 ## What it does
 
@@ -66,8 +67,8 @@ Clawd screen.
 | **POWER** | long press (1.5 s) | **power off** (press POWER to turn on again) |
 | **POWER** | 6 s | hardware forced shutdown by the PMU (last resort) |
 
-**Settings menu** (long-press BOOT): *Volume*, *Brightness* and *Standby* have **-** / **+**
-buttons, followed by the *Pair PC*, *Forget*, *Power off* and *Exit* buttons. Everything works by
+**Settings menu** (long-press BOOT): *Volume*, *Brightness*, *Standby* and *Language* (IT/EN/FR/DE/ES)
+have **-** / **+** buttons, followed by the *Pair PC*, *Forget*, *Power off* and *Exit* buttons. Everything works by
 touch; with the physical buttons, a short BOOT press moves to the next control and a short POWER
 press activates it (on values it steps them forward). It closes by itself after 30 s and the values
 are saved to flash.
@@ -79,7 +80,8 @@ repeat, and the demo ends after one minute without presses. While it runs, the P
 the scene.
 
 **Standby:** the screen turns off and the CPU drops to 80 MHz, but the BLE radio stays on, so the
-display wakes up by itself when a session needs you (*Serve te!*). BOOT wakes it too. **On battery**
+display wakes up by itself when a session needs you (*Needs you!*) or finishes (*Done!*), and goes back
+to standby 15 s later if you do not touch it. BOOT wakes it too. **On battery**
 (no USB) there is also an **automatic standby** after 10 minutes at rest with no touches (change it
 in the menu, `0` = never). The pomodoro timer is paused in standby. From the PC:
 `python host/buddy.py standby | wake | off | autostandby 15`.
@@ -219,6 +221,7 @@ updates the state, recomputes the overall one (priority: *needs you* > *working*
 | `standby` · `wake` · `off` · `autostandby minutes` | power (see above) |
 | `unpair` | forget the PCs paired over BLE |
 | `touchdebug 0\|1` | print touch coordinates on the serial port (diagnostics) |
+| `@perm <tool>` (inside `attention`/`sess` detail) | permission request; the board translates it to the selected language |
 
 The protocol is plain text, over USB serial (115200) or BLE (one line per command), so you can try
 it with a regular serial monitor. Details are in the comment at the top of `host/buddy.py`.
@@ -231,6 +234,7 @@ claude_buddy/
   board.h            board variant (1.75C vs 1.75 / 1.75-B): reset and clock pins
   hw.h / hw.cpp      audio (ES8311), motion (QMI8658), RTC (PCF85063), battery and POWER key (AXP2101)
   ble.h / ble.cpp    BLE Nordic UART server, pairing window
+  lang.h             on-screen texts in 5 languages (add a language = add a column)
 host/
   buddy.py           hook/statusLine bridge -> serial or BLE
   ble_bridge.py      BLE daemon (needs bleak)
@@ -240,6 +244,13 @@ host/
 LICENSE              MIT
 THIRD-PARTY-NOTICES.md   credits and third-party licenses
 ```
+
+## Languages
+
+The language is stored in flash and chosen from the settings menu. All on-screen texts live in
+`claude_buddy/lang.h` as a table (`STR_LIST`) with one column per language; to add one, add a
+column, a code in `LANG_CODES` and an entry in the `Lang` enum. Use ASCII only (the base font has no
+accents) and keep texts short enough for the round display.
 
 ## Known limits and common problems
 

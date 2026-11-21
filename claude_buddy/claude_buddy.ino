@@ -29,6 +29,7 @@
 #include <Preferences.h>
 #include "Arduino_GFX_Library.h"
 #include "board.h"
+#include "lang.h"
 #include "hw.h"
 #include "ble.h"
 #include "TouchDrv.hpp"  // SensorLib: touch CST9217
@@ -173,9 +174,7 @@ const ColorDef COLORS[] = {
   { "Rosa", RGB565(230, 120, 160), 7 },   { "Oro", RGB565(230, 185, 70), 12 },
 };
 const int N_COLORS = sizeof(COLORS) / sizeof(COLORS[0]);
-const char *const HAT_NAMES[] = { "Nessuno", "Cappellino", "Corona", "Auto" };
 const uint8_t HAT_LVL[] = { 1, 3, 10, 1 };
-const char *const GLS_NAMES[] = { "No", "Si", "Auto" };
 const uint8_t GLS_LVL[] = { 1, 6, 1 };
 uint8_t styleColor = 0, styleHat = 3, styleGlasses = 2;
 
@@ -226,6 +225,7 @@ void setBrightnessSmooth(uint8_t target) {
 
 // ---- Standby / spegnimento ----
 bool standby = false;
+bool wokeByEvent = false;  // risvegliata da un evento del PC: torna in standby da sola
 bool settingsOpen = false;  // menu impostazioni aperto
 enum DemoKind : uint8_t { DM_NONE, DM_BORED, DM_TIRED, DM_FULL, DM_COLD, DM_LOWBAT };
 bool demoActive = false;
@@ -238,6 +238,7 @@ uint16_t autoStandbyMin = 10;  // a batteria, dopo N minuti a riposo e senza toc
 void enterStandby() {
   if (standby) return;
   standby = true;
+  wokeByEvent = false;
   settingsOpen = false;
   hwStandby(true);
   panel->setBrightness(0);
@@ -251,13 +252,14 @@ void exitStandby() {
   setCpuFrequencyMhz(240);
   panel->displayOn();
   standby = false;
+  wokeByEvent = false;
   hwStandby(false);
   lastTouch = millis();
 }
 
 void powerOff() {
   g->fillScreen(RGB565_BLACK);
-  centerText("Spegnimento...", 220, 3, RGB565(200, 205, 220));
+  centerText(TR(TXT_POWERING), 220, 3, RGB565(200, 205, 220));
   if (canvas) canvas->flush();
   delay(900);
   hwPowerOff();
@@ -276,6 +278,15 @@ void centerText(const char *s, int y, uint8_t size, uint16_t color) {
   g->print(s);
 }
 
+// il PC manda "@perm Bash": qui diventa "Permesso: Bash" nella lingua scelta
+void localizeText(char *buf, size_t n) {
+  if (strncmp(buf, "@perm ", 6) != 0) return;
+  char tmp[40];
+  snprintf(tmp, sizeof(tmp), "%s%s", TR(TXT_PERM), buf + 6);
+  strncpy(buf, tmp, n - 1);
+  buf[n - 1] = 0;
+}
+
 void setState(State s, const char *d) {
   if (s != state) {
     if (s == S_ATTENTION) sfxPlay(SFX_ALERT);
@@ -287,6 +298,7 @@ void setState(State s, const char *d) {
   lastEvent = stateSince;
   strncpy(detail, d ? d : "", sizeof(detail) - 1);
   detail[sizeof(detail) - 1] = 0;
+  localizeText(detail, sizeof(detail));
 }
 
 // ---- Clawd ----
@@ -570,7 +582,7 @@ void drawTopRow(uint32_t t) {
   if (msgUnread) g->fillCircle(CX + 90, 28, 6, RGB565(255, 160, 80));  // messaggio non letto
   if (tmRunning) {
     int sec = tmLeftMs / 1000;
-    snprintf(buf, sizeof(buf), "%s %02d:%02d", tmFocus ? "Focus" : "Pausa", sec / 60, sec % 60);
+    snprintf(buf, sizeof(buf), "%s %02d:%02d", tmFocus ? TR(TXT_FOCUS) : TR(TXT_BREAK), sec / 60, sec % 60);
     centerText(buf, 22, 2, tmFocus ? RGB565(255, 150, 90) : RGB565(110, 230, 150));
     return;
   }
@@ -588,7 +600,7 @@ void drawTopRow(uint32_t t) {
     g->fillRect(x, 44, W * todoDone / todoTotal, 4, RGB565(130, 200, 255));
     return;
   }
-  snprintf(buf, sizeof(buf), "Lv %d", petLevel);
+  snprintf(buf, sizeof(buf), TR(TXT_LV), petLevel);
   centerText(buf, 20, 2, RGB565(150, 160, 185));
   const int W = 90, x = CX - W / 2;
   g->fillRect(x, 44, W, 4, RGB565(40, 44, 56));
@@ -1058,70 +1070,71 @@ void drawClawdPage() {
     case S_IDLE:
       if (clockText[0]) centerText(clockText, 62, 4, RGB565(150, 170, 200));
       if (batLow) {
-        centerText("Batteria scarica", 372, 2, RGB565(255, 110, 100));
+        centerText(TR(TXT_BATLOW), 372, 2, RGB565(255, 110, 100));
       } else if (full) {
-        centerText("Memoria piena", 372, 2, RGB565(255, 130, 110));
+        centerText(TR(TXT_MEMFULL), 372, 2, RGB565(255, 130, 110));
       } else if (tired) {
         char b2[28];
-        snprintf(b2, sizeof(b2), "Stanco... usage %d%%", demoOn(DM_TIRED) ? 88 : (u5 >= 85 ? u5 : u7));
+        snprintf(b2, sizeof(b2), TR(TXT_TIRED), demoOn(DM_TIRED) ? 88 : (u5 >= 85 ? u5 : u7));
         centerText(b2, 372, 2, RGB565(150, 170, 210));
       } else if (cold) {
-        centerText("Cache fredda", 372, 2, RGB565(140, 190, 255));
+        centerText(TR(TXT_COLDCACHE), 372, 2, RGB565(140, 190, 255));
       } else if (night && !demoOn(DM_BORED)) {
-        centerText("Buonanotte", 372, 3, RGB565(120, 130, 170));
+        centerText(TR(TXT_NIGHT), 372, 3, RGB565(120, 130, 170));
       } else if (bored) {
-        centerText("Mi annoio...", 372, 2, RGB565(130, 140, 165));
+        centerText(TR(TXT_BORED), 372, 2, RGB565(130, 140, 165));
       } else {
-        centerText("In attesa", 372, 3, RGB565(120, 130, 150));
+        centerText(TR(TXT_WAITING), 372, 3, RGB565(120, 130, 150));
       }
       break;
     case S_ERROR:
-      centerText("Ops!", 372, 3, RGB565(255, 130, 110));
+      centerText(TR(TXT_OOPS), 372, 3, RGB565(255, 130, 110));
       break;
     case S_THINKING:
       {
-        char buf[12] = "Penso";  // "Penso" + 3 punti + \0 = 9 byte
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s", TR(TXT_THINKING));
         int dots = (t / 350) % 4;
         for (int i = 0; i < dots; i++) strcat(buf, ".");
         centerText(buf, 372, 3, RGB565(140, 180, 255));
       }
       break;
     case S_WORKING:
-      centerText("Lavoro", 360, 3, RGB565(255, 170, 90));
+      centerText(TR(TXT_WORKING), 360, 3, RGB565(255, 170, 90));
       if (detail[0]) centerText(detail, 392, 2, RGB565(200, 140, 90));
       break;
     case S_ATTENTION:
-      centerText("Serve te!", 366, 3, RGB565(255, 210, 60));
+      centerText(TR(TXT_NEEDYOU), 366, 3, RGB565(255, 210, 60));
       if (detail[0]) centerText(detail, 400, 2, RGB565(220, 190, 90));
       break;
     case S_DONE:
-      centerText("Fatto!", 372, 3, RGB565(110, 230, 150));
+      centerText(TR(TXT_DONE), 372, 3, RGB565(110, 230, 150));
       break;
     case S_SLEEP:
       if (clockText[0]) centerText(clockText, 100, 3, RGB565(70, 80, 100));
       centerText("z z z", 372, 3, RGB565(60, 70, 90));
       break;
   }
-  if (dizzy) centerText("Che giramenti!", 372, 2, RGB565(255, 220, 100));
-  else if (batFullOn) centerText("Carica completa!", 372, 3, RGB565(110, 230, 150));
+  if (dizzy) centerText(TR(TXT_DIZZY), 372, 2, RGB565(255, 220, 100));
+  else if (batFullOn) centerText(TR(TXT_BATFULL), 372, 3, RGB565(110, 230, 150));
   else if (batAlertOn) {
-    centerText("Batteria scarica!", 372, 3, RGB565(255, 110, 100));
-    centerText("Collegami al cavo", 404, 2, RGB565(200, 140, 130));
+    centerText(TR(TXT_BATALERT), 372, 3, RGB565(255, 110, 100));
+    centerText(TR(TXT_PLUGIN), 404, 2, RGB565(200, 140, 130));
   } else if (uAlarm) {
     char b4[24];
-    snprintf(b4, sizeof(b4), "Usage al %d%%!", alarmPct);
+    snprintf(b4, sizeof(b4), TR(TXT_USAGEAL), alarmPct);
     centerText(b4, 372, 3, RGB565(255, 110, 100));
-  } else if (uReset) centerText("Puoi ripartire!", 372, 3, RGB565(110, 230, 150));
+  } else if (uReset) centerText(TR(TXT_RESETOK), 372, 3, RGB565(110, 230, 150));
   else if (fxOn) {
-    const char *ft = fxKind == FX_COMMIT ? "Commit!" : fxKind == FX_PUSH ? "Push!" : fxKind == FX_TESTOK ? "Test ok!" : "Compatto...";
+    const char *ft = fxKind == FX_COMMIT ? "Commit!" : fxKind == FX_PUSH ? "Push!" : fxKind == FX_TESTOK ? "Test ok!" : TR(TXT_COMPACT);
     centerText(ft, 372, 3, RGB565(235, 232, 200));
   }
-  else if (annoyed) centerText("Basta!", 372, 3, RGB565(255, 120, 100));
-  else if (laugh) centerText("Ahah!", 372, 3, RGB565(255, 230, 120));
-  else if (midnight) centerText("Mezzanotte!", 372, 3, RGB565(235, 232, 200));
+  else if (annoyed) centerText(TR(TXT_ANNOYED), 372, 3, RGB565(255, 120, 100));
+  else if (laugh) centerText(TR(TXT_LAUGH), 372, 3, RGB565(255, 230, 120));
+  else if (midnight) centerText(TR(TXT_MIDNIGHT), 372, 3, RGB565(235, 232, 200));
   if (lvlUp) {
     char b3[20];
-    snprintf(b3, sizeof(b3), "Livello %d!", petLevel);
+    snprintf(b3, sizeof(b3), TR(TXT_LEVEL_UP), petLevel);
     centerText(b3, 372, 3, RGB565(255, 220, 100));
   }
   if (!overlay) {
@@ -1142,11 +1155,11 @@ void drawClawdPage() {
 // ---- Pagina Sessioni ----
 static const char *stateWord(char s) {
   switch (s) {
-    case 'W': return "Lavoro";
-    case 'T': return "Penso";
-    case 'A': return "Serve te!";
-    case 'D': return "Fatto";
-    default: return "A riposo";
+    case 'W': return TR(ST_W);
+    case 'T': return TR(ST_T);
+    case 'A': return TR(ST_A);
+    case 'D': return TR(ST_D);
+    default: return TR(ST_I);
   }
 }
 
@@ -1174,11 +1187,11 @@ void drawSessionsPage() {
   uint32_t t = millis();
   g->fillScreen(RGB565_BLACK);
   char buf[24];
-  snprintf(buf, sizeof(buf), "Sessioni: %d", sessN);
+  snprintf(buf, sizeof(buf), TR(TXT_SESSIONS), sessN);
   centerText(buf, 52, 3, RGB565(200, 205, 220));
   if (sessN == 0) {
-    centerText("Nessuna sessione", 200, 2, RGB565(120, 130, 150));
-    centerText("di Claude Code", 226, 2, RGB565(120, 130, 150));
+    centerText(TR(TXT_NOSESS1), 200, 2, RGB565(120, 130, 150));
+    centerText(TR(TXT_NOSESS2), 226, 2, RGB565(120, 130, 150));
     return;
   }
   for (int i = 0; i < sessN; i++) {
@@ -1214,7 +1227,7 @@ void drawSessionsPage() {
     int32_t cr = cacheRemaining(s);
     if (cr >= 0) {
       char cb[20];
-      if (cr == 0) snprintf(cb, sizeof(cb), "cache fredda");
+      if (cr == 0) snprintf(cb, sizeof(cb), "%s", TR(TXT_CACHECOLD));
       else snprintf(cb, sizeof(cb), "cache %d:%02d", (int)(cr / 60), (int)(cr % 60));
       rightText(cb, 400, y + 44, 1, cr == 0 ? RGB565(120, 170, 255) : cr < 60 ? RGB565(255, 190, 90) : RGB565(110, 200, 140));
     }
@@ -1224,7 +1237,7 @@ void drawSessionsPage() {
 // ---- Pagina Usage ----
 void formatRemaining(int mins, char *out, size_t n) {
   if (mins < 0) snprintf(out, n, "--");
-  else if (mins >= 1440) snprintf(out, n, "%dg %dh", mins / 1440, (mins % 1440) / 60);
+  else if (mins >= 1440) snprintf(out, n, TR(TXT_DAYFMT), mins / 1440, (mins % 1440) / 60);
   else if (mins >= 60) snprintf(out, n, "%dh %02dm", mins / 60, mins % 60);
   else snprintf(out, n, "%dm", mins);
 }
@@ -1237,7 +1250,7 @@ void drawBar(int y, const char *label, int pctv, int minsLeft) {
   g->print(label);
   char buf[16];
   if (pctv >= 0) snprintf(buf, sizeof(buf), "%d%%", pctv);
-  else snprintf(buf, sizeof(buf), "n/d");
+  else snprintf(buf, sizeof(buf), "%s", TR(TXT_NA));
   rightText(buf, X + W, y - 28, 2, RGB565(225, 228, 238));
   g->fillRoundRect(X, y, W, H, 8, RGB565(34, 36, 46));
   if (pctv >= 0) {
@@ -1263,25 +1276,25 @@ void drawUsagePage() {
   uint32_t el = usageAt ? (millis() - usageAt) / 60000 : 0;  // minuti dall'ultimo dato
   int m5 = (u5min >= 0) ? max(0, u5min - (int)el) : -1;
   int m7 = (u7min >= 0) ? max(0, u7min - (int)el) : -1;
-  drawBar(135, "Sessione 5 ore", u5, m5);
-  drawBar(235, "Settimana", u7, m7);
-  drawBar(335, "Contesto", uctx, -1);
+  drawBar(135, TR(TXT_FIVEH), u5, m5);
+  drawBar(235, TR(TXT_WEEK), u7, m7);
+  drawBar(335, TR(TXT_CONTEXT), uctx, -1);
   char buf[40];
-  snprintf(buf, sizeof(buf), "Oggi $%d.%02d  +%d -%d", statCents / 100, statCents % 100, statAdd, statRm);
+  snprintf(buf, sizeof(buf), TR(TXT_TODAYCOST), statCents / 100, statCents % 100, statAdd, statRm);
   centerText(buf, 376, 2, RGB565(170, 175, 195));
   int bp = batPercent();
   if (bp >= 0) {
-    snprintf(buf, sizeof(buf), "Batt %d%%%s", bp, batCharging() ? " carica" : usbPresent() ? " USB" : "");
+    snprintf(buf, sizeof(buf), "Batt %d%%%s", bp, batCharging() ? TR(TXT_CHARGING) : usbPresent() ? " USB" : "");
     centerText(buf, 402, 2, bp < 20 && !usbPresent() ? RGB565(255, 110, 100) : RGB565(130, 140, 165));
   }
-  if (u5 < 0 && u7 < 0) centerText("limiti: solo abbonati", 424, 1, RGB565(90, 100, 120));
+  if (u5 < 0 && u7 < 0) centerText(TR(TXT_LIMITS), 424, 1, RGB565(90, 100, 120));
 }
 
 // ---- Pagina Oggi: riepilogo della giornata ----
 void drawTodayPage() {
   g->fillScreen(RGB565_BLACK);
-  centerText("Oggi", 40, 3, RGB565(200, 205, 220));
-  const char *labels[6] = { "Prompt", "Tool", "Lavoro", "Costo", "Righe", "Livello" };
+  centerText(TR(TXT_TODAY), 40, 3, RGB565(200, 205, 220));
+  const char *labels[6] = { "Prompt", "Tool", TR(TXT_L_WORK), TR(TXT_L_COST), TR(TXT_L_LINES), TR(TXT_L_LEVEL) };
   char v[6][24];
   snprintf(v[0], sizeof(v[0]), "%d", todayPrompts);
   snprintf(v[1], sizeof(v[1]), "%d", todayTools);
@@ -1318,30 +1331,30 @@ void drawTimerPage() {
     int x = CX + (int)(205 * cosf(a)), y = CY + (int)(205 * sinf(a));
     g->fillCircle(x, y, i < lit ? 4 : 2, i < lit ? on : RGB565(45, 48, 60));
   }
-  centerText(tmFocus ? "Focus" : "Pausa", 92, 3, on);
+  centerText(tmFocus ? TR(TXT_FOCUS) : TR(TXT_BREAK), 92, 3, on);
   char buf[12];
   int sec = (tmLeftMs + 999) / 1000;
   snprintf(buf, sizeof(buf), "%02d:%02d", sec / 60, sec % 60);
   centerText(buf, 140, 7, RGB565(230, 232, 240));
   // Clawd in miniatura: lavora durante il focus, riposa durante la pausa
   drawMini(CX, 250, 6, ts, 0, (tmFocus && tmRunning) ? 0 : 1);
-  centerText(tmRunning ? "tocca: pausa" : "tocca: avvia", 340, 2, RGB565(150, 160, 185));
-  centerText("tieni premuto: reset", 366, 1, RGB565(90, 100, 120));
+  centerText(tmRunning ? TR(TXT_TAP_PAUSE) : TR(TXT_TAP_START), 340, 2, RGB565(150, 160, 185));
+  centerText(TR(TXT_HOLD_RESET), 366, 1, RGB565(90, 100, 120));
 }
 
 // ---- Pagina Messaggio: ultimo messaggio di Claude, con a-capo e scorrimento ----
 void drawMsgPage() {
   g->fillScreen(RGB565_BLACK);
-  centerText("Ultimo messaggio", 40, 2, RGB565(200, 205, 220));
+  centerText(TR(TXT_LASTMSG), 40, 2, RGB565(200, 205, 220));
   if (!msgText[0]) {
-    centerText("Nessun messaggio", 210, 2, RGB565(120, 130, 150));
+    centerText(TR(TXT_NOMSG), 210, 2, RGB565(120, 130, 150));
     return;
   }
-  char buf[40];
+  char buf[72];
   uint32_t age = msgAgeS + (millis() - msgRecvAt) / 1000;
-  if (age < 60) snprintf(buf, sizeof(buf), "%s - ora", msgName);
-  else if (age < 3600) snprintf(buf, sizeof(buf), "%s - %u min fa", msgName, (unsigned)(age / 60));
-  else snprintf(buf, sizeof(buf), "%s - %u h fa", msgName, (unsigned)(age / 3600));
+  if (age < 60) snprintf(buf, sizeof(buf), TR(TXT_AGE_NOW), msgName);
+  else if (age < 3600) snprintf(buf, sizeof(buf), TR(TXT_AGE_MIN), msgName, (unsigned)(age / 60));
+  else snprintf(buf, sizeof(buf), TR(TXT_AGE_HOUR), msgName, (unsigned)(age / 3600));
   centerText(buf, 68, 2, RGB565(130, 140, 165));
 
   // a-capo per parole: 25 caratteri per riga (size 2 = 12 px/carattere)
@@ -1405,8 +1418,8 @@ void drawStylePage() {
   p.armL = p.armR = 0.1f * sinf(ts * 2.2f);
   if (fmodf(ts, 4.2f) < 0.14f) p.openK = 0.1f;
   drawClawd(p);
-  const char *labels[4] = { "COLORE", "CAPPELLO", "OCCHIALI", "SUONO" };
-  const char *vals[4] = { COLORS[styleColor].name, HAT_NAMES[styleHat], GLS_NAMES[styleGlasses], audioEnabled() ? "acceso" : "spento" };
+  const char *labels[4] = { TR(TXT_STY_COLOR), TR(TXT_STY_HAT), TR(TXT_STY_GLASS), TR(TXT_STY_SOUND) };
+  const char *vals[4] = { TR((StrId)(COLOR_0 + styleColor)), TR((StrId)(HAT_0 + styleHat)), TR((StrId)(GLS_0 + styleGlasses)), audioEnabled() ? TR(TXT_ON) : TR(TXT_OFF) };
   for (int i = 0; i < 4; i++) {
     int x = CX + STY_X[i & 1], y = STY_Y[i >> 1];
     bool fl = (int32_t)(styFlashUntil - t) > 0 && styFlashId == i;
@@ -1422,7 +1435,7 @@ void drawStylePage() {
     if (i == 0) g->fillCircle(x + STY_W - 22, y + STY_H / 2, 10, COLORS[styleColor].c);  // anteprima del colore
   }
   char lv[16];
-  snprintf(lv, sizeof(lv), "Livello %d", petLevel);
+  snprintf(lv, sizeof(lv), TR(TXT_LEVEL_N), petLevel);
   centerText(lv, 418, 1, RGB565(110, 120, 140));
 }
 
@@ -1471,21 +1484,21 @@ void drawInfoPage() {
   char buf[40];
   if (lastDataAt) {
     uint32_t sAgo = (t - lastDataAt) / 1000;
-    if (sAgo < 90) snprintf(buf, sizeof(buf), "PC: dati %us fa", (unsigned)sAgo);
-    else snprintf(buf, sizeof(buf), "PC: dati %um fa", (unsigned)(sAgo / 60));
+    if (sAgo < 90) snprintf(buf, sizeof(buf), TR(TXT_PCDATA_S), (unsigned)sAgo);
+    else snprintf(buf, sizeof(buf), TR(TXT_PCDATA_M), (unsigned)(sAgo / 60));
     centerText(buf, 100, 2, sAgo < 600 ? RGB565(110, 220, 150) : RGB565(255, 190, 90));
   } else {
-    centerText("PC: nessun dato", 100, 2, RGB565(255, 110, 100));
+    centerText(TR(TXT_PCNODATA), 100, 2, RGB565(255, 110, 100));
   }
   uint32_t up = t / 1000;
-  snprintf(buf, sizeof(buf), "Acceso: %uh %02um", (unsigned)(up / 3600), (unsigned)((up % 3600) / 60));
+  snprintf(buf, sizeof(buf), TR(TXT_UPTIME), (unsigned)(up / 3600), (unsigned)((up % 3600) / 60));
   centerText(buf, 126, 2, RGB565(170, 175, 195));
-  if (clockValid) snprintf(buf, sizeof(buf), "Ora: %s (%s)", clockText, rtcPresent() ? "RTC" : "PC");
-  else snprintf(buf, sizeof(buf), "Ora: non impostata");
+  if (clockValid) snprintf(buf, sizeof(buf), TR(TXT_TIME), clockText, rtcPresent() ? "RTC" : "PC");
+  else snprintf(buf, sizeof(buf), "%s", TR(TXT_TIMEUNSET));
   centerText(buf, 152, 2, RGB565(170, 175, 195));
   statusDot(CX - 110, 190, "Touch", touchOk);
   statusDot(CX + 22, 190, "Audio", hwAudioOk());
-  statusDot(CX - 110, 218, "Moto", hwImuOk());
+  statusDot(CX - 110, 218, TR(TXT_MOTION), hwImuOk());
   statusDot(CX + 22, 218, "RTC", rtcPresent());
   statusDot(CX - 110, 246, "PMU", hwPmuOk());
   statusDot(CX + 22, 246, "PSRAM", ESP.getPsramSize() > 0);
@@ -1495,18 +1508,18 @@ void drawInfoPage() {
   centerText(buf, 310, 2, RGB565(130, 140, 165));
   int bp = batPercent();
   if (bp >= 0) {
-    snprintf(buf, sizeof(buf), "Batt %d%%%s", bp, batCharging() ? " carica" : usbPresent() ? " USB" : "");
+    snprintf(buf, sizeof(buf), "Batt %d%%%s", bp, batCharging() ? TR(TXT_CHARGING) : usbPresent() ? " USB" : "");
     centerText(buf, 336, 2, RGB565(170, 175, 195));
   }
   centerText(__DATE__, 366, 1, RGB565(90, 100, 120));
 }
 
 // ---- Menu impostazioni (si apre tenendo premuto BOOT) ----
-int setFocus = 0;  // controllo evidenziato (tasti fisici): 0 volume, 1 luminosita', 2 standby, 3 associa, 4 dimentica, 5 spegni, 6 esci
+int setFocus = 0;  // controllo evidenziato (tasti fisici): 0 volume, 1 luminosita', 2 standby, 3 lingua, 4 associa, 5 dimentica, 6 spegni, 7 esci
 uint32_t setLastInput = 0;
 uint32_t btnFlashUntil = 0;  // feedback visivo del bottone premuto
 int btnFlashId = -1;
-const int SET_FOCUS_N = 7;
+const int SET_FOCUS_N = 8;
 static const uint16_t STANDBY_STEPS[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
 
 void saveBrightness() {
@@ -1528,6 +1541,13 @@ int standbyIndex() {
   for (int i = 0; i < n; i++)
     if (STANDBY_STEPS[i] == autoStandbyMin) return i;
   return 0;
+}
+
+void saveLang() {
+  Preferences pf;
+  pf.begin("claudebuddy", false);
+  pf.putUChar("lang", gLang);
+  pf.end();
 }
 
 void openSettings() {
@@ -1568,6 +1588,11 @@ void actStandby(int d, bool wrap) {
   saveAutoStandby();
   sfxPlay(SFX_TAP);
 }
+void actLang(int d) {
+  gLang = (uint8_t)((gLang + d + LANG_COUNT) % LANG_COUNT);
+  saveLang();
+  sfxPlay(SFX_TAP);
+}
 void actPair() {
   if (blePairingOpen(nullptr)) bleSetPairing(false);
   else {
@@ -1578,7 +1603,7 @@ void actPair() {
 }
 void actUnpair() {
   bleUnpairAll();
-  showToast("PC dimenticati");
+  showToast(TR(TXT_FORGOT));
   sfxPlay(SFX_DONE);
 }
 void actOff() {
@@ -1594,19 +1619,20 @@ void settingsActivate() {
     case 0: actVolume(1, true); break;
     case 1: actBright(1, true); break;
     case 2: actStandby(1, true); break;
-    case 3: actPair(); break;
-    case 4: actUnpair(); break;
-    case 5: actOff(); break;
+    case 3: actLang(1); break;
+    case 4: actPair(); break;
+    case 5: actUnpair(); break;
+    case 6: actOff(); break;
     default: closeSettings(); break;
   }
 }
 
 // geometria
-static const int ST_ROW_Y[3] = { 66, 126, 186 };
-const int ST_ROW_H = 52;
+static const int ST_ROW_Y[4] = { 56, 108, 160, 212 };
+const int ST_ROW_H = 46;
 const int ST_MINUS_X = -4, ST_PLUS_X = 106, ST_STEP_W = 46;  // relativi a CX
-static const int ST_BTN_Y[2] = { 258, 322 };
-const int ST_BTN_H = 56;
+static const int ST_BTN_Y[2] = { 270, 330 };
+const int ST_BTN_H = 52;
 
 static bool inRect(int px, int py, int x, int y, int w, int h, int pad = 6) {
   return px >= x - pad && px <= x + w + pad && py >= y - pad && py <= y + h + pad;
@@ -1616,7 +1642,7 @@ void settingsTouch(int sx, int sy) {
   setLastInput = millis();
   lastTouch = setLastInput;
   // righe con - / +
-  for (int r = 0; r < 3; r++) {
+  for (int r = 0; r < 4; r++) {
     int y = ST_ROW_Y[r];
     int dir = 0;
     if (inRect(sx, sy, CX + ST_MINUS_X, y, ST_STEP_W, ST_ROW_H)) dir = -1;
@@ -1627,7 +1653,8 @@ void settingsTouch(int sx, int sy) {
       btnFlashUntil = millis() + 150;
       if (r == 0) actVolume(dir, false);
       else if (r == 1) actBright(dir, false);
-      else actStandby(dir, false);
+      else if (r == 2) actStandby(dir, false);
+      else actLang(dir);
       return;
     }
   }
@@ -1635,8 +1662,8 @@ void settingsTouch(int sx, int sy) {
   for (int b = 0; b < 4; b++) {
     int x = CX + ((b & 1) ? 6 : -150), y = ST_BTN_Y[b >> 1];
     if (inRect(sx, sy, x, y, 144, ST_BTN_H)) {
-      setFocus = 3 + b;
-      btnFlashId = 6 + b;
+      setFocus = 4 + b;
+      btnFlashId = 8 + b;
       btnFlashUntil = millis() + 150;
       settingsActivate();
       return;
@@ -1660,13 +1687,13 @@ static void drawButton(int x, int y, int w, int h, const char *label, uint16_t f
 
 void drawSettingsPage() {
   g->fillScreen(RGB565_BLACK);
-  centerText("Impostazioni", 24, 2, RGB565(200, 205, 220));
+  centerText(TR(TXT_SETTINGS), 24, 2, RGB565(200, 205, 220));
   uint32_t t = millis();
   bool fl = (int32_t)(btnFlashUntil - t) > 0;
   const uint16_t bg = RGB565(36, 42, 62), bgStep = RGB565(48, 56, 82);
   char v[16];
-  const char *labels[3] = { "Volume", "Luminosita'", "Standby" };
-  for (int r = 0; r < 3; r++) {
+  const char *labels[4] = { TR(TXT_VOLUME), TR(TXT_BRIGHT), TR(TXT_STANDBY), TR(TXT_LANGUAGE) };
+  for (int r = 0; r < 4; r++) {
     int y = ST_ROW_Y[r];
     bool foc = setFocus == r;
     g->fillRoundRect(CX - 150, y, 300, ST_ROW_H, 14, RGB565(20, 24, 36));
@@ -1676,25 +1703,27 @@ void drawSettingsPage() {
     g->setCursor(CX - 140, y + (ST_ROW_H - 14) / 2);
     g->print(labels[r]);
     if (r == 0) {
-      if (audioVolume() == 0) strcpy(v, "muto");
+      if (audioVolume() == 0) snprintf(v, sizeof(v), "%s", TR(TXT_MUTE));
       else snprintf(v, sizeof(v), "%u%%", (unsigned)audioVolume());
     } else if (r == 1) {
       snprintf(v, sizeof(v), "%d%%", (int)userBrightness * 100 / 255);
-    } else {
-      if (autoStandbyMin == 0) strcpy(v, "mai");
+    } else if (r == 2) {
+      if (autoStandbyMin == 0) snprintf(v, sizeof(v), "%s", TR(TXT_NEVER));
       else snprintf(v, sizeof(v), "%um", (unsigned)autoStandbyMin);
+    } else {
+      snprintf(v, sizeof(v), "%s", LANG_CODES[gLang]);
     }
     drawButton(CX + ST_MINUS_X, y + 3, ST_STEP_W, ST_ROW_H - 6, "-", bgStep, RGB565(255, 220, 120), false, fl && btnFlashId == r * 2, 3);
     drawButton(CX + ST_PLUS_X, y + 3, ST_STEP_W, ST_ROW_H - 6, "+", bgStep, RGB565(255, 220, 120), false, fl && btnFlashId == r * 2 + 1, 3);
-    centerTextAt(v, CX + 70 + 0, y + (ST_ROW_H - 14) / 2, 2, RGB565(235, 238, 248));
+    centerTextAt(v, CX + 77, y + (ST_ROW_H - 14) / 2, 2, RGB565(235, 238, 248));
   }
   bool pairOpen = blePairingOpen(nullptr);
-  drawButton(CX - 150, ST_BTN_Y[0], 144, ST_BTN_H, pairOpen ? "Annulla" : "Associa PC", pairOpen ? RGB565(70, 90, 50) : RGB565(34, 70, 110), RGB565(235, 238, 248), setFocus == 3, fl && btnFlashId == 6);
-  drawButton(CX + 6, ST_BTN_Y[0], 144, ST_BTN_H, "Dimentica", bg, RGB565(235, 238, 248), setFocus == 4, fl && btnFlashId == 7);
-  drawButton(CX - 150, ST_BTN_Y[1], 144, ST_BTN_H, "Spegni", RGB565(100, 36, 36), RGB565(255, 200, 190), setFocus == 5, fl && btnFlashId == 8);
-  drawButton(CX + 6, ST_BTN_Y[1], 144, ST_BTN_H, "Esci", bg, RGB565(235, 238, 248), setFocus == 6, fl && btnFlashId == 9);
-  if ((int32_t)(toastUntil - t) > 0) centerText(toast, 400, 2, RGB565(255, 230, 140));
-  else centerText("BOOT: scorri  POWER: ok", 408, 1, RGB565(110, 120, 140));
+  drawButton(CX - 150, ST_BTN_Y[0], 144, ST_BTN_H, pairOpen ? TR(TXT_CANCEL) : TR(TXT_PAIR), pairOpen ? RGB565(70, 90, 50) : RGB565(34, 70, 110), RGB565(235, 238, 248), setFocus == 4, fl && btnFlashId == 8);
+  drawButton(CX + 6, ST_BTN_Y[0], 144, ST_BTN_H, TR(TXT_FORGET), bg, RGB565(235, 238, 248), setFocus == 5, fl && btnFlashId == 9);
+  drawButton(CX - 150, ST_BTN_Y[1], 144, ST_BTN_H, TR(TXT_POWEROFF), RGB565(100, 36, 36), RGB565(255, 200, 190), setFocus == 6, fl && btnFlashId == 10);
+  drawButton(CX + 6, ST_BTN_Y[1], 144, ST_BTN_H, TR(TXT_EXIT), bg, RGB565(235, 238, 248), setFocus == 7, fl && btnFlashId == 11);
+  if ((int32_t)(toastUntil - t) > 0) centerText(toast, 394, 2, RGB565(255, 230, 140));
+  else centerText(TR(TXT_SET_HINT), 400, 1, RGB565(110, 120, 140));
   if (canvas) canvas->flush();
 }
 
@@ -1703,29 +1732,29 @@ void drawPairWaitPage() {
   g->fillScreen(RGB565_BLACK);
   uint32_t left = 0;
   blePairingOpen(&left);
-  centerText("Associazione", 70, 3, RGB565(200, 205, 220));
-  centerText("Sul PC apri", 130, 2, RGB565(150, 160, 185));
-  centerText("Bluetooth > Aggiungi", 160, 2, RGB565(235, 238, 248));
-  centerText("dispositivo", 186, 2, RGB565(235, 238, 248));
-  centerText("e scegli", 220, 2, RGB565(150, 160, 185));
+  centerText(TR(TXT_PAIRING), 70, 3, RGB565(200, 205, 220));
+  centerText(TR(TXT_PAIR_L1), 130, 2, RGB565(150, 160, 185));
+  centerText(TR(TXT_PAIR_L2), 160, 2, RGB565(235, 238, 248));
+  centerText(TR(TXT_PAIR_L3), 186, 2, RGB565(235, 238, 248));
+  centerText(TR(TXT_PAIR_L4), 220, 2, RGB565(150, 160, 185));
   centerText("Claude Buddy", 250, 3, RGB565(255, 200, 90));
   char b[12];
   snprintf(b, sizeof(b), "%u:%02u", (unsigned)(left / 60000), (unsigned)((left / 1000) % 60));
   centerText(b, 306, 3, RGB565(120, 130, 150));
-  drawButton(CX - 80, 354, 160, 52, "Annulla", RGB565(60, 40, 40), RGB565(255, 200, 190), false, false);
+  drawButton(CX - 80, 354, 160, 52, TR(TXT_CANCEL), RGB565(60, 40, 40), RGB565(255, 200, 190), false, false);
   if (canvas) canvas->flush();
 }
 
 // ---- Associazione BLE: codice da digitare sul PC ----
 void drawPairingPage(uint32_t code) {
   g->fillScreen(RGB565_BLACK);
-  centerText("Associazione", 90, 3, RGB565(200, 205, 220));
-  centerText("Digita questo codice", 150, 2, RGB565(130, 140, 165));
-  centerText("sul PC", 176, 2, RGB565(130, 140, 165));
+  centerText(TR(TXT_PAIRING), 90, 3, RGB565(200, 205, 220));
+  centerText(TR(TXT_TYPECODE), 150, 2, RGB565(130, 140, 165));
+  centerText(TR(TXT_ONPC), 176, 2, RGB565(130, 140, 165));
   char buf[10];
   snprintf(buf, sizeof(buf), "%06u", (unsigned)code);
   centerText(buf, 240, 6, RGB565(255, 200, 90));
-  centerText("Bluetooth > Aggiungi dispositivo", 350, 1, RGB565(90, 100, 120));
+  centerText(TR(TXT_PAIR_FOOT), 350, 1, RGB565(90, 100, 120));
   if (canvas) canvas->flush();
 }
 
@@ -1830,6 +1859,7 @@ void parseSess(const char *p) {
   s.name[nl] = 0;
   strncpy(s.tool, bar ? bar + 1 : "", sizeof(s.tool) - 1);
   s.tool[sizeof(s.tool) - 1] = 0;
+  localizeText(s.tool, sizeof(s.tool));
 }
 
 // esperienza -> livello: lv = 1 + floor(sqrt(xp / 25)); accessori a lv 3 (cappellino), 6 (occhiali), 10 (corona)
@@ -1991,12 +2021,8 @@ void pollSerial() {
 
 // ---- Tasto BOOT: demo degli stati ----
 // ---- Demo animazioni: BOOT breve le scorre tutte ----
-static const char *const DEMO_NAMES[] = {
-  "In attesa", "Penso", "Lavoro", "Errore", "Serve te", "Fatto", "Dorme", "Annoiato", "Stanco", "Memoria piena",
-  "Cache fredda", "Batt. scarica", "Allarme batt.", "Carica completa", "Commit", "Push", "Test ok", "Compattazione",
-  "Livello su", "Allarme usage", "Limite azzerato", "Carezza", "Risata", "Infastidito", "Stordito", "Mezzanotte"
-};
-const int DEMO_N = sizeof(DEMO_NAMES) / sizeof(DEMO_NAMES[0]);
+// i nomi delle demo sono in lang.h (DEMO_0..DEMO_25)
+const int DEMO_N = 26;
 // ripetizione automatica (ms) per gli effetti a tempo, 0 = resta finche' non premi
 static const uint16_t DEMO_PERIOD[DEMO_N] = {
   0, 0, 0, 2800, 0, 4500, 0, 0, 0, 0,
@@ -2020,7 +2046,7 @@ void demoApply(int i) {
     case 1: setState(S_THINKING, ""); break;
     case 2: setState(S_WORKING, "Bash"); break;
     case 3: setState(S_ERROR, ""); break;
-    case 4: setState(S_ATTENTION, "Permesso: Bash"); break;
+    case 4: setState(S_ATTENTION, "@perm Bash"); break;
     case 5: setState(S_DONE, ""); break;
     case 6: setState(S_SLEEP, ""); break;
     case 7: demoKind = DM_BORED; break;
@@ -2045,7 +2071,7 @@ void demoApply(int i) {
     default: break;
   }
   char b[24];
-  snprintf(b, sizeof(b), "%d/%d %s", i + 1, DEMO_N, DEMO_NAMES[i]);
+  snprintf(b, sizeof(b), "%d/%d %s", i + 1, DEMO_N, TR((StrId)(DEMO_0 + i)));
   showToast(b);
   demoRetrig = now + (DEMO_PERIOD[i] ? DEMO_PERIOD[i] : 0x7fffffff);
 }
@@ -2164,7 +2190,7 @@ void cycleGlasses() {
 void startFx(uint8_t kind) {
   uint32_t now = millis();
   if (kind == FX_TESTFAIL) {
-    showToast("Test falliti");
+    showToast(TR(TXT_TESTFAIL));
     return;
   }
   fxKind = kind;
@@ -2268,6 +2294,7 @@ void pollTouch() {
   }
   if (pressed) {
     lastTouch = now;
+    wokeByEvent = false;  // l'utente ha preso il controllo
     if (!wasPressed) { x0 = xl = x; y0 = yl = y; t0 = now; }
     else { xl = x; yl = y; }
   } else if (wasPressed) {
@@ -2309,6 +2336,7 @@ void setup() {
     styleGlasses = pf.getUChar("gls", 2) % 3;
     autoStandbyMin = pf.getUShort("asb", 10);
     userBrightness = pf.getUChar("bri", 120);
+    gLang = pf.getUChar("lang", LANG_IT) % LANG_COUNT;
     pf.end();
   }
   uint32_t r = rtcGet();  // ora dell'RTC (resta giusta anche a PC spento)
@@ -2344,7 +2372,10 @@ void loop() {
 
   if (standby) {
     // schermo spento: si resta in ascolto; serve-te sveglia lo schermo
-    if (state == S_ATTENTION || blePasskeyActive(nullptr)) exitStandby();
+    if (state == S_ATTENTION || state == S_DONE || blePasskeyActive(nullptr)) {  // serve te / ho finito / associazione
+      exitStandby();
+      wokeByEvent = true;
+    }
     if (tmRunning) tmLast = now;  // il timer resta in pausa
     batUpdate(now);
     delay(30);
@@ -2410,6 +2441,10 @@ void loop() {
   // di notte va a dormire presto; di giorno prima si annoia (vedi drawClawdPage)
   uint32_t sleepAfter = isNight() ? 20000UL : 150000UL;
   if (state == S_IDLE && ago(now, lastEvent) > sleepAfter) state = S_SLEEP;  // senza azzerare lastEvent
+
+  // risvegliata da un evento: finito, e passati 15 s a riposo senza tocchi, torna in standby
+  if (wokeByEvent && (state == S_IDLE || state == S_SLEEP) && !tmRunning && !demoActive && !settingsOpen && ago(now, lastTouch) > 15000)
+    enterStandby();
 
   // a batteria: dopo un po' a riposo e senza tocchi, standby automatico
   if (autoStandbyMin && !usbPresent() && batPercent() >= 0 && !tmRunning && (state == S_IDLE || state == S_SLEEP) &&
