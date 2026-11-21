@@ -175,7 +175,7 @@ const ColorDef COLORS[] = {
 };
 const int N_COLORS = sizeof(COLORS) / sizeof(COLORS[0]);
 const uint8_t HAT_LVL[] = { 1, 3, 10, 1 };
-const uint8_t GLS_LVL[] = { 1, 6, 1 };
+const uint8_t GLS_LVL[] = { 1, 6, 1, 1 };  // 0 no, 1 si, 2 auto, 3 thug life
 uint8_t styleColor = 0, styleHat = 3, styleGlasses = 2;
 
 #define FW_VERSION "1.1"
@@ -231,6 +231,7 @@ enum DemoKind : uint8_t { DM_NONE, DM_BORED, DM_TIRED, DM_FULL, DM_COLD, DM_LOWB
 bool demoActive = false;
 int demoIdx = -1;
 uint8_t demoKind = DM_NONE;
+uint8_t demoIdleAct = 0;  // attivita' di riposo forzata dalla demo (1-4)
 uint32_t demoRetrig = 0, demoEnds = 0;
 #define demoOn(k) (demoActive && demoKind == (k))
 uint16_t autoStandbyMin = 10;  // a batteria, dopo N minuti a riposo e senza tocchi; 0 = mai
@@ -257,16 +258,6 @@ void exitStandby() {
   lastTouch = millis();
 }
 
-void powerOff() {
-  g->fillScreen(RGB565_BLACK);
-  centerText(TR(TXT_POWERING), 220, 3, RGB565(200, 205, 220));
-  if (canvas) canvas->flush();
-  delay(900);
-  hwPowerOff();
-  delay(1500);
-  // ancora acceso: alimentato dall'USB, il PMU non toglie le tensioni. Si ripiega sullo standby.
-  enterStandby();
-}
 
 void centerText(const char *s, int y, uint8_t size, uint16_t color) {
   g->setTextSize(size);
@@ -326,9 +317,11 @@ int effHat() {
   if (styleHat == 3) return petLevel >= 10 ? 2 : petLevel >= 3 ? 1 : 0;
   return HAT_LVL[styleHat] <= petLevel ? styleHat : 0;
 }
-bool effGlasses() {
-  if (styleGlasses == 2) return petLevel >= 6;
-  return styleGlasses == 1 && petLevel >= 6;
+// 0 nessuno, 1 occhiali tondi, 2 occhiali "Thug Life"
+int effGlasses() {
+  if (styleGlasses == 3) return petLevel >= GLS_LVL[3] ? 2 : 0;
+  if (styleGlasses == 2) return petLevel >= 6 ? 1 : 0;
+  return (styleGlasses == 1 && petLevel >= 6) ? 1 : 0;
 }
 
 void drawClawd(const Pose &p) {
@@ -423,7 +416,20 @@ void drawClawd(const Pose &p) {
     g->fillRect(cx - 4 * U, top - 20, 8 * U, 20, RGB565(70, 120, 210));
     g->fillRect(cx - 14, top - 32, 28, 14, RGB565(235, 238, 245));
   }
-  if (effGlasses() && p.eye != EYE_CLOSED) {  // occhiali
+  int glassesKind = effGlasses();
+  if (glassesKind == 2) {  // occhiali "Thug Life": montatura nera a pixel con i riflessi
+    const uint16_t bk = RGB565(12, 12, 16), gl = RGB565(95, 100, 115);
+    int lx = cx + (int)p.lookX;
+    g->fillRect(lx - 100, ecy - 30, 200, 14, bk);  // barra superiore
+    for (int side = -1; side <= 1; side += 2) {  // lenti a gradini
+      int x0 = side < 0 ? lx - 96 : lx + 8;
+      g->fillRect(x0, ecy - 16, 88, 14, bk);
+      g->fillRect(x0 + 6, ecy - 2, 76, 14, bk);
+      g->fillRect(x0 + 18, ecy + 12, 52, 14, bk);
+      g->fillRect(x0 + 14, ecy - 12, 14, 4, gl);  // riflessi
+      g->fillRect(x0 + 32, ecy - 12, 6, 4, gl);
+    }
+  } else if (glassesKind == 1 && p.eye != EYE_CLOSED) {  // occhiali
     const uint16_t fr = RGB565(235, 238, 245);
     for (int side = -1; side <= 1; side += 2) {
       int ex = cx + side * 3 * U + (int)p.lookX;
@@ -500,6 +506,82 @@ void drawSweat(int x, int y, float ts) {
 void drawStar(int x, int y, uint16_t c) {
   g->fillRect(x - 6, y - 1, 12, 3, c);
   g->fillRect(x - 1, y - 6, 3, 12, c);
+}
+
+// animazione di spegnimento: Clawd saluta, si addormenta, lo schermo si chiude come un vecchio televisore
+void powerOffAnimation() {
+  const uint32_t T_WAVE = 1100, T_SLEEP = 900, T_CRT = 800;
+  const uint32_t total = T_WAVE + T_SLEEP + T_CRT;
+  sfxPlay(SFX_OFF);
+  uint32_t t0 = millis();
+  for (;;) {
+    uint32_t e = millis() - t0;
+    if (e >= total) break;
+    float ts = e / 1000.0f;
+    g->fillScreen(RGB565_BLACK);
+    Pose p;
+    if (e < T_WAVE) {  // saluta con la manina
+      p.armR = 0.85f + 0.15f * sinf(ts * 15);
+      p.dy = 2 * sinf(ts * 4);
+      p.lookX = 4 * sinf(ts * 3);
+    } else if (e < T_WAVE + T_SLEEP) {  // si addormenta
+      float k = (e - T_WAVE) / (float)T_SLEEP;
+      p.eye = k > 0.3f ? EYE_CLOSED : EYE_OPEN;
+      p.openK = 1.0f - k;
+      p.squash = (int)(34 * k);
+      p.armL = p.armR = -0.2f * k;
+    } else {
+      p.eye = EYE_CLOSED;
+      p.squash = 34;
+      p.armL = p.armR = -0.2f;
+    }
+    drawClawd(p);
+    if (e < T_WAVE + T_SLEEP) {
+      centerText(TR(TXT_POWERING), 372, 3, RGB565(200, 205, 220));
+    }
+    if (e >= T_WAVE) {  // "z" che salgono
+      for (int i = 0; i < 3; i++) {
+        float age = fmodf(ts / 1.5f + i / 3.0f, 1.0f);
+        g->setTextSize(2 + (i % 2));
+        g->setTextColor(scaled(110, 130, 180, 1.0f - age));
+        g->setCursor(CX + 70 + (int)(age * 30), BODY_TOP + 30 - (int)(age * 60));
+        g->print("z");
+      }
+    }
+    if (e >= T_WAVE + T_SLEEP) {  // effetto "TV che si spegne": prima si chiude in una riga, poi in un punto
+      float c = (e - T_WAVE - T_SLEEP) / (float)T_CRT;
+      if (c < 0.6f) {
+        float k = c / 0.6f;
+        int bar = (int)(233 * (1.0f - (1.0f - k) * (1.0f - k)));  // chiusura veloce poi rallenta
+        if (bar > 230) bar = 230;
+        g->fillRect(0, 0, LCD_WIDTH, bar, RGB565_BLACK);
+        g->fillRect(0, LCD_HEIGHT - bar, LCD_WIDTH, bar, RGB565_BLACK);
+        if (bar >= 200) g->fillRect(0, CY - 1, LCD_WIDTH, 3, RGB565(235, 240, 255));
+      } else {
+        float k = (c - 0.6f) / 0.4f;
+        int half = (int)((LCD_WIDTH / 2) * (1.0f - k));
+        g->fillScreen(RGB565_BLACK);
+        if (half > 1) g->fillRect(CX - half, CY - 1, half * 2, 3, RGB565(235, 240, 255));
+        else g->fillCircle(CX, CY, 2, RGB565(235, 240, 255));
+      }
+    }
+    if (canvas) canvas->flush();
+    delay(12);
+  }
+  g->fillScreen(RGB565_BLACK);
+  if (canvas) canvas->flush();
+}
+
+void powerOff() {
+  if (standby) exitStandby();  // dallo standby lo schermo e' spento: lo riaccende per l'animazione
+  setBrightnessSmooth(userBrightness);
+  curBrightness = userBrightness;
+  panel->setBrightness(curBrightness);
+  powerOffAnimation();
+  hwPowerOff();
+  delay(1500);
+  // ancora acceso: alimentato dall'USB, il PMU non toglie le tensioni. Si ripiega sullo standby.
+  enterStandby();
 }
 
 // ---- Batteria: indicatore, allarme e fine carica ----
@@ -695,6 +777,151 @@ void drawHeart(int x, int y, int s, uint16_t c) {
   g->fillTriangle(x - s - 1, y + 2, x + s + 1, y + 2, x, y + s + 6, c);
 }
 
+// ---- Attivita' di riposo: ogni tanto Clawd smette di passeggiare e fa qualcosa ----
+enum IdleAct : uint8_t { ACT_NONE, ACT_BALL, ACT_READ, ACT_COFFEE, ACT_MUSIC, ACT_COUNT };
+uint8_t idleAct = ACT_NONE;
+uint32_t idleActStart = 0, idleActUntil = 0, idleNextAt = 0;
+uint8_t idleLastAct = ACT_NONE;
+
+// sceglie quando iniziare e finire un'attivita' (solo con Clawd a riposo, di giorno)
+void idleActScheduler(uint32_t t, bool night) {
+  if (state != S_IDLE) {
+    idleAct = ACT_NONE;
+    idleNextAt = 0;
+    return;
+  }
+  if (demoIdleAct) {  // demo: attivita' forzata (anche di notte)
+    if (idleAct != demoIdleAct) {
+      idleAct = demoIdleAct;
+      idleActStart = t;
+    }
+    idleActUntil = t + 100000;
+    return;
+  }
+  if (night) {
+    idleAct = ACT_NONE;
+    idleNextAt = 0;
+    return;
+  }
+  if (idleAct && (int32_t)(t - idleActUntil) >= 0) {
+    idleAct = ACT_NONE;
+    idleNextAt = t + 12000 + random(0, 16000);
+    return;
+  }
+  if (!idleAct) {
+    if (idleNextAt == 0) idleNextAt = t + 8000 + random(0, 10000);
+    if ((int32_t)(t - idleNextAt) >= 0 && ago(t, lastEvent) > 5000) {
+      uint8_t a = 1 + random(0, ACT_COUNT - 1);
+      if (a == idleLastAct) a = 1 + (a % (ACT_COUNT - 1));  // non ripete la stessa due volte
+      idleLastAct = idleAct = a;
+      idleActStart = t;
+      idleActUntil = t + 9000 + random(0, 4000);
+    }
+  }
+}
+
+// posa di Clawd durante l'attivita' (ats = secondi dall'inizio)
+void idlePose(Pose &p, float ats) {
+  float ts = millis() / 1000.0f;
+  p = Pose();
+  switch (idleAct) {
+    case ACT_BALL: {
+      float ph = ats * 1.7f;
+      p.dx = 60 * sinf(ph - 0.5f);
+      p.lookX = (cosf(ph) > 0 ? 1 : -1) * 8;
+      p.lookY = 6;
+      p.legAmp = 7;
+      p.legPhase = ts * 14;
+      p.armL = 0.3f + 0.3f * sinf(ats * 5);
+      p.armR = 0.3f + 0.3f * sinf(ats * 5 + PI);
+      break;
+    }
+    case ACT_READ:
+      p.squash = 10;
+      p.lookY = 12;
+      p.lookX = 7 * sinf(ats * 2.5f);
+      p.armL = p.armR = 0.12f;
+      if (fmodf(ts, 4.2f) < 0.14f) p.openK = 0.1f;
+      break;
+    case ACT_COFFEE: {
+      float s = fmodf(ats, 5.0f);
+      float lift = s < 1.0f ? s : (s < 2.4f ? 1.0f : (s < 3.4f ? 1.0f - (s - 2.4f) : 0.0f));
+      p.armR = 0.15f + 0.8f * lift;
+      p.armL = 0.1f;
+      if (lift > 0.8f) p.eye = EYE_HAPPY;
+      p.dy = 2 * sinf(ts * 2.2f);
+      break;
+    }
+    case ACT_MUSIC:
+      p.eye = EYE_HAPPY;
+      p.dx = 28 * sinf(ats * 3);
+      p.dy = -10 * fabsf(sinf(ats * 6));
+      p.armL = 0.5f + 0.5f * sinf(ats * 6);
+      p.armR = 0.5f + 0.5f * sinf(ats * 6 + PI);
+      p.legAmp = 8;
+      p.legPhase = ts * 12;
+      break;
+  }
+}
+
+// oggetti disegnati sopra Clawd (palla, libro, tazza, note)
+void drawIdleProps(int cx, const Pose &p, float ats) {
+  int top = BODY_TOP + (int)p.dy + p.squash;
+  switch (idleAct) {
+    case ACT_BALL: {
+      float bx = CX + 150 * sinf(ats * 1.7f);
+      float h = 90 * fabsf(sinf(ats * 5));
+      int by = GROUND_Y - 16 - (int)h;
+      g->fillEllipse((int)bx, GROUND_Y, 14 - (int)(h / 12), 5, RGB565(30, 30, 36));
+      g->fillCircle((int)bx, by, 16, RGB565(235, 90, 70));
+      g->fillRect((int)bx - 14, by - 1, 28, 3, RGB565(245, 245, 250));
+      g->drawCircle((int)bx, by, 16, RGB565(250, 200, 190));
+      break;
+    }
+    case ACT_READ: {
+      int by = top + 4 * U + 4;
+      g->fillRoundRect(cx - 100, by - 4, 200, 70, 6, RGB565(60, 80, 140));
+      g->fillRect(cx - 94, by, 90, 62, RGB565(240, 235, 215));
+      g->fillRect(cx + 4, by, 90, 62, RGB565(240, 235, 215));
+      for (int i = 0; i < 4; i++) {
+        g->fillRect(cx - 84, by + 9 + i * 13, 68, 3, RGB565(150, 145, 130));
+        g->fillRect(cx + 14, by + 9 + i * 13, 68, 3, RGB565(150, 145, 130));
+      }
+      float f = fmodf(ats, 3.5f) / 0.5f;  // giro pagina
+      if (f < 1.0f) {
+        int w = (int)(90 * cosf(f * PI));
+        if (w >= 0) g->fillRect(cx, by, w + 4, 62, RGB565(252, 248, 232));
+        else g->fillRect(cx + w, by, -w, 62, RGB565(252, 248, 232));
+      }
+      break;
+    }
+    case ACT_COFFEE: {
+      int right = cx + 5 * U;
+      int ay = top + 2 * U - (int)(p.armR * 50);
+      int mx = right + 8, my = ay - 20;
+      g->fillRect(mx, my, 30, 28, RGB565(235, 235, 240));
+      g->fillRect(mx + 2, my + 2, 26, 6, RGB565(110, 70, 45));
+      g->drawRect(mx + 30, my + 6, 8, 14, RGB565(235, 235, 240));  // manico
+      for (int i = 0; i < 3; i++) {
+        float age = fmodf(ats * 0.9f + i * 0.33f, 1.0f);
+        g->fillCircle(mx + 8 + i * 7 + (int)(4 * sinf(ats * 5 + i)), my - 4 - (int)(age * 34), 3, scaled(230, 230, 240, 1.0f - age));
+      }
+      break;
+    }
+    case ACT_MUSIC:
+      for (int i = 0; i < 4; i++) {
+        float age = fmodf(ats * 0.6f + i * 0.25f, 1.0f);
+        int x = cx + (int)((i - 1.5f) * 62) + (int)(15 * sinf(ats * 3 + i));
+        int y = BODY_TOP - 10 - (int)(age * 90);
+        uint16_t c = scaled(i % 2 ? 255 : 150, i % 2 ? 200 : 220, i % 2 ? 120 : 255, 1.0f - age * 0.8f);
+        g->fillCircle(x, y, 6, c);
+        g->fillRect(x + 5, y - 22, 3, 22, c);
+        g->fillRect(x + 5, y - 22, 11, 4, c);
+      }
+      break;
+  }
+}
+
 void drawClawdPage() {
   uint32_t t = millis();
   float ts = t / 1000.0f;
@@ -717,6 +944,8 @@ void drawClawdPage() {
   bool full = (uctx >= 90 && (state == S_IDLE || state == S_THINKING || state == S_WORKING)) || demoOn(DM_FULL);  // contesto quasi pieno
   bool cold = (state == S_IDLE && sessN > 0 && cacheRemaining(sess[0]) == 0) || demoOn(DM_COLD);                  // cache prompt scaduta
 
+  idleActScheduler(t, night);
+  float ats = (t - idleActStart) / 1000.0f;
   switch (state) {
     case S_IDLE: {
       // gira per la scrivania, ogni tanto saluta
@@ -748,6 +977,7 @@ void drawClawdPage() {
         }
       }
       if (blink) p.openK = 0.1f;
+      if (idleAct) idlePose(p, ats);  // attivita' di riposo: sostituisce la posa
       break;
     }
     case S_THINKING:
@@ -997,6 +1227,8 @@ void drawClawdPage() {
       drawStar(CX - 150 + i * 56, BODY_TOP - 62 - (i % 3) * 14, scaled(255, 240, 160, k));
     }
   }
+  bool actOn = idleAct && state == S_IDLE && !busy && !annoyed && !laugh && !midnight && !petting;
+  if (actOn) drawIdleProps(cx, p, ats);
   if (tired) drawSweat(cx + 86, BODY_TOP + 8 + (int)p.dy, ts);
   if (full) drawSweat(cx - 96, BODY_TOP + 24, ts);
   if (cold) {  // fiocchi di neve
@@ -1069,7 +1301,9 @@ void drawClawdPage() {
   if (!overlay) switch (state) {
     case S_IDLE:
       if (clockText[0]) centerText(clockText, 62, 4, RGB565(150, 170, 200));
-      if (batLow) {
+      if (actOn) {
+        centerText(TR((StrId)(TXT_ACT_BALL + idleAct - 1)), 372, 2, RGB565(150, 165, 200));
+      } else if (batLow) {
         centerText(TR(TXT_BATLOW), 372, 2, RGB565(255, 110, 100));
       } else if (full) {
         centerText(TR(TXT_MEMFULL), 372, 2, RGB565(255, 130, 110));
@@ -2022,12 +2256,13 @@ void pollSerial() {
 // ---- Tasto BOOT: demo degli stati ----
 // ---- Demo animazioni: BOOT breve le scorre tutte ----
 // i nomi delle demo sono in lang.h (DEMO_0..DEMO_25)
-const int DEMO_N = 26;
+const int DEMO_N = 30;
 // ripetizione automatica (ms) per gli effetti a tempo, 0 = resta finche' non premi
 static const uint16_t DEMO_PERIOD[DEMO_N] = {
   0, 0, 0, 2800, 0, 4500, 0, 0, 0, 0,
   0, 0, 6500, 7500, 4500, 4800, 4500, 4500,
-  5000, 5500, 6000, 3200, 3500, 4000, 4500, 8500
+  5000, 5500, 6000, 3200, 3500, 4000, 4500, 8500,
+  0, 0, 0, 0
 };
 
 void demoApply(int i) {
@@ -2038,6 +2273,7 @@ void demoApply(int i) {
   fxUntil = 0;
   fxKind = FX_NONE;
   demoKind = DM_NONE;
+  demoIdleAct = 0;
   page = PG_CLAWD;
   lastTouch = now;
   lastEvent = now;
@@ -2068,6 +2304,7 @@ void demoApply(int i) {
     case 23: annoyUntil = now + 2500; sfxPlay(SFX_ERROR); break;
     case 24: dizzyUntil = now + 3000; sfxPlay(SFX_DIZZY); break;
     case 25: midnightUntil = now + 7000; sfxPlay(SFX_HEART); break;
+    case 26: case 27: case 28: case 29: demoIdleAct = i - 25; break;
     default: break;
   }
   char b[24];
@@ -2089,6 +2326,7 @@ void demoService(uint32_t now) {
   if ((int32_t)(now - demoEnds) > 0) {
     demoActive = false;
     demoKind = DM_NONE;
+    demoIdleAct = 0;
     return;
   }
   if (demoRetrig != 0x7fffffffu && (int32_t)(now - demoRetrig) >= 0) demoApply(demoIdx);
@@ -2180,8 +2418,8 @@ void cycleHat() {
   }
 }
 void cycleGlasses() {
-  for (int i = 1; i <= 3; i++) {
-    int v = (styleGlasses + i) % 3;
+  for (int i = 1; i <= 4; i++) {
+    int v = (styleGlasses + i) % 4;
     if (GLS_LVL[v] <= petLevel) { styleGlasses = v; break; }
   }
 }
@@ -2333,7 +2571,7 @@ void setup() {
     pf.begin("claudebuddy", true);
     styleColor = pf.getUChar("col", 0) % N_COLORS;
     styleHat = pf.getUChar("hat", 3) % 4;
-    styleGlasses = pf.getUChar("gls", 2) % 3;
+    styleGlasses = pf.getUChar("gls", 2) % 4;
     autoStandbyMin = pf.getUShort("asb", 10);
     userBrightness = pf.getUChar("bri", 120);
     gLang = pf.getUChar("lang", LANG_IT) % LANG_COUNT;

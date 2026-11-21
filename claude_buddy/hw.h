@@ -14,6 +14,7 @@ enum Sfx : uint8_t {
   SFX_LEVEL,     // Clawd sale di livello
   SFX_TIMER,     // timer finito
   SFX_DIZZY,     // scossa
+  SFX_OFF,       // spegnimento
   SFX_COUNT
 };
 

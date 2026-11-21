@@ -76,11 +76,12 @@ static const Note N_ERROR[] = {{330, 120}, {0, 30}, {247, 220}};
 static const Note N_HEART[] = {{1047, 55}, {1319, 90}};
 static const Note N_LEVEL[] = {{523, 80}, {659, 80}, {784, 80}, {1047, 90}, {1319, 230}};
 static const Note N_TIMER[] = {{1047, 120}, {0, 60}, {1047, 120}, {0, 60}, {1319, 120}, {0, 60}, {1568, 300}};
+static const Note N_OFF[] = {{784, 110}, {659, 110}, {523, 110}, {392, 130}, {262, 320}};
 static const Note N_DIZZY[] = {{600, 70}, {450, 70}, {600, 70}, {450, 70}, {300, 160}};
 struct SfxDef { const Note *n; uint8_t len; };
 static const SfxDef SFX[SFX_COUNT] = {
   {N_TAP, 1}, {N_ALERT, 7}, {N_DONE, 4}, {N_ERROR, 3},
-  {N_HEART, 2}, {N_LEVEL, 5}, {N_TIMER, 7}, {N_DIZZY, 5},
+  {N_HEART, 2}, {N_LEVEL, 5}, {N_TIMER, 7}, {N_DIZZY, 5}, {N_OFF, 5},
 };
 
 static int16_t sbuf[256 * 2];

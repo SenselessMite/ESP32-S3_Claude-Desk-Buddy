@@ -87,6 +87,7 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(GLS_0,          "No",                    "No",                    "Non",                   "Nein",                  "No") \
   X(GLS_1,          "Si",                    "Yes",                   "Oui",                   "Ja",                    "Si") \
   X(GLS_2,          "Auto",                  "Auto",                  "Auto",                  "Auto",                  "Auto") \
+  X(GLS_3,          "Thug Life",             "Thug Life",             "Thug Life",             "Thug Life",             "Thug Life") \
   X(TXT_LEVEL_N,    "Livello %d",            "Level %d",              "Niveau %d",             "Level %d",              "Nivel %d") \
   X(TXT_PCDATA_S,   "PC: dati %us fa",       "PC: data %us ago",      "PC: donnees %us",       "PC: Daten %us",         "PC: datos %us") \
   X(TXT_PCDATA_M,   "PC: dati %um fa",       "PC: data %um ago",      "PC: donnees %um",       "PC: Daten %um",         "PC: datos %um") \
@@ -118,6 +119,10 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(TXT_TYPECODE,   "Digita questo codice",  "Type this code",        "Saisis ce code",        "Code eingeben",         "Escribe este codigo") \
   X(TXT_ONPC,       "sul PC",                "on the PC",             "sur le PC",             "am PC",                 "en el PC") \
   X(TXT_PAIR_FOOT,  "Bluetooth > Aggiungi dispositivo", "Bluetooth > Add device", "Bluetooth > Ajouter appareil", "Bluetooth > Geraet hinzufuegen", "Bluetooth > Anadir dispositivo") \
+  X(TXT_ACT_BALL,   "Gioco a palla",         "Playing ball",          "Je joue au ballon",     "Ich spiele Ball",       "Jugando a la pelota") \
+  X(TXT_ACT_READ,   "Leggo un libro",        "Reading a book",        "Je lis un livre",       "Ich lese ein Buch",     "Leyendo un libro") \
+  X(TXT_ACT_COFFEE, "Pausa caffe",           "Coffee break",          "Pause cafe",            "Kaffeepause",           "Hora del cafe") \
+  X(TXT_ACT_MUSIC,  "Ascolto musica",        "Listening to music",    "J'ecoute de la musique", "Ich hoere Musik",      "Escuchando musica") \
   X(DEMO_0,  "In attesa",       "Waiting",       "En attente",    "Bereit",        "En espera") \
   X(DEMO_1,  "Penso",           "Thinking",      "Reflexion",     "Denkt",         "Pensando") \
   X(DEMO_2,  "Lavoro",          "Working",       "Travail",       "Arbeitet",      "Trabajando") \
@@ -143,7 +148,11 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(DEMO_22, "Risata",          "Laughing",      "Rire",          "Lacht",         "Risa") \
   X(DEMO_23, "Infastidito",     "Annoyed",       "Agace",         "Veraergert",    "Molesto") \
   X(DEMO_24, "Stordito",        "Dizzy",         "Etourdi",       "Schwindlig",    "Mareado") \
-  X(DEMO_25, "Mezzanotte",      "Midnight",      "Minuit",        "Mitternacht",   "Medianoche")
+  X(DEMO_25, "Mezzanotte",      "Midnight",      "Minuit",        "Mitternacht",   "Medianoche") \
+  X(DEMO_26, "Gioco a palla",   "Playing ball",  "Jeu de ballon", "Ballspiel",     "Pelota") \
+  X(DEMO_27, "Lettura",         "Reading",       "Lecture",       "Lesen",         "Lectura") \
+  X(DEMO_28, "Pausa caffe",     "Coffee break",  "Pause cafe",    "Kaffeepause",   "Cafe") \
+  X(DEMO_29, "Musica",          "Music",         "Musique",       "Musik",         "Musica")
 
 enum StrId : uint16_t {
 #define X(id, ...) id,

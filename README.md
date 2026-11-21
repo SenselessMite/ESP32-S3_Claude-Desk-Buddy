@@ -20,7 +20,7 @@ settings menu); the code comments are in Italian and the documentation is in Eng
 
 | Situation | What you see |
 |---|---|
-| Idle | walks around and waves; after 1 minute it gets bored and yawns; at night it says "Buonanotte" and falls asleep early |
+| Idle | walks around and waves; every so often it picks a **random activity** (plays with a ball, reads a book, has a coffee, dances to music); after 1 minute it gets bored and yawns; at night it says "Buonanotte" and falls asleep early |
 | Thinking | hand on chin and a thought bubble |
 | Working | types on a keyboard with sparks; a **scrolling line** below shows the detail (command, file, pattern...) |
 | Oops! | a tool failed: shakes its head with a "?" |
@@ -50,7 +50,7 @@ Clawd · **Sessions** · **Usage** · **Today** · **Timer** · **Message** · *
 - **Today**: prompts, tools, working hours, cost, lines, level.
 - **Timer**: 25/5 pomodoro (tap = start/pause, long press = reset).
 - **Message**: Claude's last reply, with vertical scrolling.
-- **Style**: four buttons (Color, Hat, Glasses, Sound), each changes its value on every tap. Also
+- **Style**: four buttons (Color, Hat, Glasses incl. pixel "Thug Life" shades, Sound), each changes its value on every tap. Also
   opens by long-pressing Clawd.
 - **Info**: PC and chip status (touch, audio, motion, RTC, PMU, BLE, USB), memory, version.
 
@@ -61,7 +61,7 @@ Clawd screen.
 
 | Button | Gesture | Effect |
 |---|---|---|
-| **BOOT** | short press | plays the **next Clawd animation** (26 in total) as a demo/test |
+| **BOOT** | short press | plays the **next Clawd animation** (30 in total) as a demo/test |
 | **BOOT** | long press (~1 s) | opens/closes the **settings menu** |
 | **POWER** | short press | **standby** (screen off) / wake |
 | **POWER** | long press (1.5 s) | **power off** (press POWER to turn on again) |
@@ -74,8 +74,8 @@ press activates it (on values it steps them forward). It closes by itself after 
 are saved to flash.
 
 **Animation demo:** every short BOOT press (outside the menu) shows the next animation with its
-number and name (states, bored/tired/memory full/cold cache, battery cases, commit/push/tests/
-compaction, level up, usage alarm, petting, laughing, annoyed, dizzy, midnight...). Timed effects
+number and name (30 in total: states, idle activities, bored/tired/memory full/cold cache, battery cases,
+commit/push/tests/compaction, level up, usage alarm, petting, laughing, annoyed, dizzy, midnight...). Timed effects
 repeat, and the demo ends after one minute without presses. While it runs, the PC does not change
 the scene.
 
