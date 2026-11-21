@@ -10,7 +10,7 @@
   Protocollo (maiuscole/minuscole indifferenti): idle | thinking | working [tool] |
   attention [msg] | done | error | sleep, sessions N, sess ..., usage ..., agents N, pet xp,
   stats ..., today ..., todo ..., msg ..., tick ..., fx ..., epoch ..., time HH:MM,
-  bright N, sound 0|1, standby, wake, off, autostandby MIN, unpair. Il dettaglio di ogni comando e' in README.md e in host/buddy.py.
+  bright N, sound 0|1, autovol 0|1, micdebug 0|1, autorotate 0|1, orientdebug 0|1, demo N, standby, wake, off, autostandby MIN, unpair. Il dettaglio di ogni comando e' in README.md e in host/buddy.py.
 
   Interfaccia: swipe orizzontale tra le pagine (Clawd, Sessioni, Usage, Oggi, Timer,
   Messaggio, Stile, Info); tieni premuto su Clawd per aprire Stile.
@@ -99,6 +99,11 @@ TouchDrvCST92xx touch;
 volatile bool gTouchIrq = false;
 bool touchDebug = false;  // comando 'touchdebug 1': stampa i punti del touch sulla seriale
 bool touchOk = false;
+bool touchHeld = false;   // un dito e' sullo schermo (non si ruota a meta' di un gesto)
+
+// ---- Orientamento automatico: l'IMU decide quale bordo e' in alto, il canvas ruota il disegno ----
+bool autoRotate = false;  // impostazione (salvata in flash)
+uint8_t curRot = 0;       // rotazione del canvas: 0 normale, 1/2/3 = bordo destro/basso/sinistro in alto
 
 // ---- Dati dal PC: sessioni di Claude Code e usage ----
 const int MAX_SESS = 5;
@@ -129,7 +134,8 @@ uint32_t lastTouch = 0;    // ultimo tocco (sveglia lo schermo in sleep)
 #define ago(now, t) (((int32_t)((now) - (t)) < 0) ? 0u : (uint32_t)((now) - (t)))
 
 // sub-agent attivi (mini Clawd), esperienza/livello, costi di oggi
-uint8_t agentsN = 0;
+uint8_t agentsN = 0;       // sub-agent mostrati (durante la demo possono essere finti)
+uint8_t realAgentsN = 0;   // sub-agent dichiarati dal PC
 int petLevel = 1;
 float petProg = 0;         // 0..1 verso il livello successivo
 bool petKnown = false;     // dopo il primo dato dal PC (per non festeggiare all'avvio)
@@ -174,8 +180,13 @@ const ColorDef COLORS[] = {
   { "Rosa", RGB565(230, 120, 160), 7 },   { "Oro", RGB565(230, 185, 70), 12 },
 };
 const int N_COLORS = sizeof(COLORS) / sizeof(COLORS[0]);
-const uint8_t HAT_LVL[] = { 1, 3, 10, 1 };
-const uint8_t GLS_LVL[] = { 1, 6, 1, 1 };  // 0 no, 1 si, 2 auto, 3 thug life
+// cappelli: 0 nessuno, 1 cappellino, 2 corona, 3 auto, 4 cilindro, 5 mago, 6 cuoco, 7 elica
+const uint8_t HAT_LVL[] = { 1, 3, 10, 1, 4, 8, 5, 7 };
+// occhiali: 0 no, 1 tondi, 2 auto, 3 thug life, 4 sole, 5 cuori, 6 monocolo, 7 3D
+const uint8_t GLS_LVL[] = { 1, 6, 1, 1, 8, 4, 9, 5 };
+const int N_HATS = sizeof(HAT_LVL), N_GLS = sizeof(GLS_LVL);
+bool unlockAll = false;  // comando `unlockall 1`: sblocca tutti gli accessori per provarli
+#define STYLE_LVL (unlockAll ? 99 : petLevel)
 uint8_t styleColor = 0, styleHat = 3, styleGlasses = 2;
 
 #define FW_VERSION "1.1"
@@ -232,6 +243,7 @@ bool demoActive = false;
 int demoIdx = -1;
 uint8_t demoKind = DM_NONE;
 uint8_t demoIdleAct = 0;  // attivita' di riposo forzata dalla demo (1-4)
+uint8_t demoWorkAct = 0;  // variante di lavoro forzata dalla demo (1-5)
 uint32_t demoRetrig = 0, demoEnds = 0;
 #define demoOn(k) (demoActive && demoKind == (k))
 uint16_t autoStandbyMin = 10;  // a batteria, dopo N minuti a riposo e senza tocchi; 0 = mai
@@ -256,6 +268,36 @@ void exitStandby() {
   wokeByEvent = false;
   hwStandby(false);
   lastTouch = millis();
+}
+
+void applyRotation(uint8_t r) {
+  if (r == curRot || !canvas) return;  // senza canvas (disegno diretto) il pannello non ruota
+  curRot = r;
+  canvas->setRotation(r);
+}
+
+void setAutoRotate(bool on) {
+  autoRotate = on;
+  if (!on) {
+    imuOrientationReset();
+    applyRotation(0);
+  }
+  Preferences pf;
+  pf.begin("claudebuddy", false);
+  pf.putBool("arot", on);
+  pf.end();
+}
+
+// coordinate del touch (fisiche) -> coordinate del disegno ruotato (inverso della rotazione del canvas)
+void touchToLogical(int16_t &x, int16_t &y) {
+  const int16_t M = LCD_WIDTH - 1;
+  const int16_t px = x, py = y;
+  switch (curRot) {
+    case 1: x = py; y = M - px; break;
+    case 2: x = M - px; y = M - py; break;
+    case 3: x = M - py; y = px; break;
+    default: break;
+  }
 }
 
 
@@ -314,14 +356,14 @@ bool isNight() {
   return h >= 23 || (h >= 0 && h < 6);
 }
 int effHat() {
-  if (styleHat == 3) return petLevel >= 10 ? 2 : petLevel >= 3 ? 1 : 0;
-  return HAT_LVL[styleHat] <= petLevel ? styleHat : 0;
+  if (styleHat == 3) return STYLE_LVL >= 10 ? 2 : STYLE_LVL >= 3 ? 1 : 0;
+  return HAT_LVL[styleHat] <= STYLE_LVL ? styleHat : 0;
 }
-// 0 nessuno, 1 occhiali tondi, 2 occhiali "Thug Life"
+// 0 nessuno, 1 tondi, 2 "Thug Life", 3 sole, 4 cuori, 5 monocolo, 6 3D
 int effGlasses() {
-  if (styleGlasses == 3) return petLevel >= GLS_LVL[3] ? 2 : 0;
-  if (styleGlasses == 2) return petLevel >= 6 ? 1 : 0;
-  return (styleGlasses == 1 && petLevel >= 6) ? 1 : 0;
+  if (styleGlasses == 0 || GLS_LVL[styleGlasses] > STYLE_LVL) return 0;
+  static const uint8_t kind[8] = { 0, 1, 1, 2, 3, 4, 5, 6 };  // "auto" = tondi appena sbloccati
+  return kind[styleGlasses];
 }
 
 void drawClawd(const Pose &p) {
@@ -412,6 +454,30 @@ void drawClawd(const Pose &p) {
     g->fillRect(cx - 3 * U, top - 14, 6 * U, 14, gold);
     for (int i = -1; i <= 1; i++)
       g->fillTriangle(cx + i * 2 * U - 14, top - 14, cx + i * 2 * U + 14, top - 14, cx + i * 2 * U, top - 36, gold);
+  } else if (effHat() == 4) {  // cilindro
+    g->fillRect(cx - 3 * U, top - 56, 6 * U, 52, RGB565(24, 24, 32));
+    g->fillRect(cx - 3 * U, top - 24, 6 * U, 10, RGB565(200, 60, 70));
+    g->fillRect(cx - 4 * U - 8, top - 10, 8 * U + 16, 10, RGB565(24, 24, 32));
+  } else if (effHat() == 5) {  // cappello da mago con stelline
+    g->fillTriangle(cx - 4 * U, top - 6, cx + 4 * U, top - 6, cx + 14, top - 92, RGB565(110, 70, 190));
+    g->fillRect(cx - 5 * U, top - 10, 10 * U, 10, RGB565(80, 50, 150));
+    g->fillRect(cx - 14, top - 44, 8, 8, RGB565(255, 220, 90));
+    g->fillRect(cx + 10, top - 66, 6, 6, RGB565(255, 220, 90));
+    g->fillRect(cx + 4, top - 28, 6, 6, RGB565(255, 220, 90));
+  } else if (effHat() == 6) {  // cappello da cuoco
+    const uint16_t wh = RGB565(240, 242, 248);
+    g->fillCircle(cx - 2 * U, top - 44, 24, wh);
+    g->fillCircle(cx + 2 * U, top - 44, 24, wh);
+    g->fillCircle(cx, top - 58, 28, wh);
+    g->fillRect(cx - 3 * U, top - 40, 6 * U, 40, wh);
+    g->fillRect(cx - 3 * U, top - 12, 6 * U, 4, RGB565(205, 210, 222));
+  } else if (effHat() == 7) {  // berretto con elica che gira
+    for (int i = 0; i < 4; i++)
+      g->fillRect(cx - 4 * U + i * 2 * U, top - 20, 2 * U, 20, (i & 1) ? RGB565(250, 200, 70) : RGB565(220, 70, 70));
+    g->fillRect(cx - 3, top - 36, 6, 18, RGB565(205, 210, 222));
+    int w = (int)(38 * fabsf(cosf(millis() / 110.0f)));
+    g->fillRect(cx - w, top - 44, 2 * w, 7, RGB565(90, 170, 230));
+    g->fillCircle(cx, top - 40, 6, RGB565(235, 238, 245));
   } else if (effHat() == 1) {  // cappellino con pompon
     g->fillRect(cx - 4 * U, top - 20, 8 * U, 20, RGB565(70, 120, 210));
     g->fillRect(cx - 14, top - 32, 28, 14, RGB565(235, 238, 245));
@@ -429,6 +495,35 @@ void drawClawd(const Pose &p) {
       g->fillRect(x0 + 14, ecy - 12, 14, 4, gl);  // riflessi
       g->fillRect(x0 + 32, ecy - 12, 6, 4, gl);
     }
+  } else if (glassesKind == 3) {  // occhiali da sole a goccia, montatura oro
+    for (int side = -1; side <= 1; side += 2) {
+      int ex = cx + side * 3 * U + (int)p.lookX;
+      g->fillRoundRect(ex - 24, ecy - 34, 48, 70, 18, RGB565(18, 22, 32));
+      for (int k = 0; k < 3; k++) g->drawRoundRect(ex - 24 + k, ecy - 34 + k, 48 - 2 * k, 70 - 2 * k, 18, RGB565(225, 185, 80));
+      g->fillRect(ex - 14, ecy - 24, 6, 18, RGB565(110, 150, 200));
+    }
+    g->fillRect(cx - 3 * U + 24 + (int)p.lookX, ecy - 26, 6 * U - 48, 5, RGB565(225, 185, 80));
+  } else if (glassesKind == 4) {  // occhiali a cuore
+    const uint16_t hc = RGB565(235, 70, 115);
+    for (int side = -1; side <= 1; side += 2) {
+      int ex = cx + side * 3 * U + (int)p.lookX;
+      g->fillCircle(ex - 13, ecy - 14, 17, hc);
+      g->fillCircle(ex + 13, ecy - 14, 17, hc);
+      g->fillTriangle(ex - 29, ecy - 6, ex + 29, ecy - 6, ex, ecy + 36, hc);
+      g->fillRect(ex - 22, ecy - 24, 8, 6, RGB565(255, 190, 205));
+    }
+    g->fillRect(cx - 12 + (int)p.lookX, ecy - 18, 24, 5, hc);
+  } else if (glassesKind == 5) {  // monocolo con catenella
+    int ex = cx + 3 * U + (int)p.lookX;
+    for (int k = 0; k < 4; k++) g->drawCircle(ex, ecy, 38 - k, RGB565(225, 185, 80));
+    for (int i = 0; i < 6; i++) g->fillCircle(ex + 30 + i * 2, ecy + 36 + i * 14, 3, RGB565(225, 185, 80));
+  } else if (glassesKind == 6) {  // occhiali 3D rosso/ciano
+    for (int side = -1; side <= 1; side += 2) {
+      int ex = cx + side * 3 * U + (int)p.lookX;
+      for (int k = 0; k < 8; k++)
+        g->drawRect(ex - 26 + k, ecy - 36 + k, 52 - 2 * k, 72 - 2 * k, k < 3 ? RGB565(240, 240, 245) : (side < 0 ? RGB565(230, 50, 50) : RGB565(40, 200, 230)));
+    }
+    g->fillRect(cx - 3 * U + 26 + (int)p.lookX, ecy - 4, 6 * U - 52, 4, RGB565(240, 240, 245));
   } else if (glassesKind == 1 && p.eye != EYE_CLOSED) {  // occhiali
     const uint16_t fr = RGB565(235, 238, 245);
     for (int side = -1; side <= 1; side += 2) {
@@ -488,12 +583,6 @@ void drawMini(int cx, int top, int u, float ts, float ph, int mode) {
     int h = (mode == 0) ? 3 * u / 2 : 2;
     g->fillRect(cx + side * 3 * u - u / 2, top + 2 * u, u, h < 3 ? 3 : h, C_EYE);
   }
-}
-
-void drawAgents(float ts) {
-  int n = agentsN > 4 ? 4 : agentsN;
-  for (int i = 0; i < n; i++)
-    drawMini(CX - 70 + (int)((i - (n - 1) / 2.0f) * 64), 58, 4, ts, i * 1.7f, 0);
 }
 
 void drawSweat(int x, int y, float ts) {
@@ -661,7 +750,7 @@ void drawBatteryIndicator() {
 
 void drawTopRow(uint32_t t) {
   char buf[24];
-  if (msgUnread) g->fillCircle(CX + 90, 28, 6, RGB565(255, 160, 80));  // messaggio non letto
+  if (msgUnread) g->fillCircle(CX + 76, 44, 6, RGB565(255, 160, 80));  // messaggio non letto
   if (tmRunning) {
     int sec = tmLeftMs / 1000;
     snprintf(buf, sizeof(buf), "%s %02d:%02d", tmFocus ? TR(TXT_FOCUS) : TR(TXT_BREAK), sec / 60, sec % 60);
@@ -692,7 +781,7 @@ void drawTopRow(uint32_t t) {
 // Riga scorrevole (finestra di 240 px: sta nel cerchio dello schermo). Un carattere = 12 px (size 2).
 void drawTicker(uint32_t t, uint16_t col) {
   if (!ticker[0]) return;
-  const int W = 240, X = CX - 120, Y = 414;
+  const int W = 200, X = CX - 100, Y = 414;  // finestra stretta: lascia libero l'anello usage
   int n = strlen(ticker);
   int textW = n * 12;
   if (textW <= W) {
@@ -922,6 +1011,270 @@ void drawIdleProps(int cx, const Pose &p, float ats) {
   }
 }
 
+// ---- Varianti dell'animazione di lavoro: ogni tanto Clawd cambia modo di lavorare ----
+//   TYPE   = digita sulla tastiera (quella classica)   TURBO = digita a tutta velocita', concentrato
+//   PHONES = digita in cuffia a tempo di musica        DEBUG = insegue un bug con la lente
+//   BUILD  = batte col martello sull'incudine           GEARS = fa girare gli ingranaggi
+enum WorkAnim : uint8_t { WK_TYPE, WK_TURBO, WK_PHONES, WK_DEBUG, WK_BUILD, WK_GEARS, WK_COUNT };
+uint8_t workAnim = WK_TYPE, workLast = WK_TYPE;
+uint32_t workAnimStart = 0, workAnimUntil = 0, workSeenAt = 0;
+
+// sceglie la variante. Tra un tool e l'altro lo stato passa da lavoro a pensiero: la variante resta
+// quella finche' non scade o non passa una lunga pausa, cosi' non cambia a ogni tool.
+void workAnimScheduler(uint32_t t) {
+  if (state != S_WORKING) return;
+  if (demoWorkAct) {  // demo: variante forzata
+    if (workAnim != demoWorkAct) {
+      workAnim = demoWorkAct;
+      workAnimStart = t;
+    }
+    workAnimUntil = t + 100000;
+    workSeenAt = t;
+    return;
+  }
+  if (workAnimUntil == 0 || (int32_t)(t - workAnimUntil) >= 0 || ago(t, workSeenAt) > 15000) {
+    uint8_t a = random(0, 100) < 30 ? WK_TYPE : 1 + random(0, WK_COUNT - 1);  // la classica resta la piu' frequente
+    if (a == workLast) a = (a + 1 + random(0, WK_COUNT - 1)) % WK_COUNT;      // mai la stessa due volte di fila
+    workLast = workAnim = a;
+    workAnimStart = t;
+    workAnimUntil = t + 12000 + random(0, 10000);
+  }
+  workSeenAt = t;
+}
+
+// posa di Clawd mentre lavora (wts = secondi dall'inizio della variante)
+void workPose(Pose &p, float ts, float wts) {
+  p.keyboard = true;
+  p.lookY = 10;
+  p.lookX = 10 * sinf(ts * 4);
+  p.openK = 0.7f;
+  p.armL = -0.35f + 0.3f * sinf(ts * 18);
+  p.armR = -0.35f + 0.3f * sinf(ts * 18 + PI);
+  p.dy = 1.5f * sinf(ts * 20);
+  p.legAmp = 5;
+  p.legPhase = ts * 20;
+  switch (workAnim) {
+    case WK_TURBO:  // sopracciglia aggrottate, mani veloci, testa che dondola
+      p.brow = 1;
+      p.openK = 0.55f;
+      p.lookX = 4 * sinf(ts * 9);
+      p.armL = -0.35f + 0.4f * sinf(ts * 32);
+      p.armR = -0.35f + 0.4f * sinf(ts * 32 + PI);
+      p.dx = 3 * sinf(ts * 13);
+      p.dy = 2.5f * sinf(ts * 30);
+      p.legAmp = 8;
+      p.legPhase = ts * 34;
+      break;
+    case WK_PHONES:  // occhi felici, ondeggia a tempo, digita piano
+      p.eye = EYE_HAPPY;
+      p.dx = 10 * sinf(ts * 3.2f);
+      p.dy = -3 * fabsf(sinf(ts * 3.2f));
+      p.lookX = 0;
+      p.armL = -0.35f + 0.25f * sinf(ts * 9);
+      p.armR = -0.35f + 0.25f * sinf(ts * 9 + PI);
+      p.legAmp = 6;
+      p.legPhase = ts * 6.4f;
+      break;
+    case WK_DEBUG:  // segue il bug con lo sguardo
+      p.lookX = (30 + 90 * sinf(wts * 1.3f)) / 8.0f;
+      p.lookY = 14;
+      p.openK = 0.9f;
+      p.armR = 0.15f + 0.05f * sinf(ts * 5);
+      break;
+    case WK_BUILD: {  // martello: si alza piano, scende di colpo, si ferma un attimo sull'incudine
+      p.keyboard = false;
+      float s = fmodf(wts * 1.1f, 1.0f);
+      if (s < 0.6f) p.armR = -0.45f + 1.35f * (s / 0.6f);
+      else if (s < 0.72f) p.armR = 0.9f - 1.35f * ((s - 0.6f) / 0.12f);
+      else p.armR = -0.45f;
+      p.armL = -0.1f + 0.05f * sinf(ts * 3);
+      p.lookX = 8;
+      p.lookY = 12;
+      p.dy = (s >= 0.72f && s < 0.8f) ? 3 : 0;
+      p.legAmp = 0;
+      break;
+    }
+    case WK_GEARS:  // guarda in alto gli ingranaggi che girano
+      p.keyboard = false;
+      p.lookY = -12;
+      p.lookX = 8 * sinf(ts * 1.5f);
+      p.armL = p.armR = 0.45f + 0.1f * sinf(ts * 3);
+      p.dy = 2 * sinf(ts * 3);
+      p.legAmp = 0;
+      break;
+    default:
+      break;
+  }
+}
+
+static void drawGear(int x, int y, int r, int teeth, float ang, uint16_t c) {
+  for (int i = 0; i < teeth; i++) {
+    float a = ang + i * 6.2832f / teeth;
+    g->fillCircle(x + (int)((r + 4) * cosf(a)), y + (int)((r + 4) * sinf(a)), 5, c);
+  }
+  g->fillCircle(x, y, r, c);
+  g->fillCircle(x, y, r / 3, RGB565(34, 36, 46));
+}
+
+// oggetti e decorazioni della variante di lavoro corrente
+void drawWorkProps(int cx, const Pose &p, float ts, float wts) {
+  const int top = BODY_TOP + (int)p.dy + p.squash;
+  const int left = cx - 5 * U, right = cx + 5 * U;
+  switch (workAnim) {
+    case WK_TURBO:
+      drawSparks(ts * 2.2f, cx);
+      drawSweat(cx + 86, BODY_TOP + 8 + (int)p.dy, ts);
+      break;
+    case WK_PHONES: {
+      const uint16_t band = RGB565(48, 52, 64), cup = RGB565(90, 140, 220), cupDark = RGB565(60, 100, 170);
+      g->fillRect(left - 2, top - 16, 10 * U + 4, 8, band);  // archetto e supporti
+      g->fillRect(left - 2, top - 16, 8, 30, band);
+      g->fillRect(right - 6, top - 16, 8, 30, band);
+      g->fillRect(left - 14, top + 6, 24, 48, cup);  // padiglioni
+      g->fillRect(right - 10, top + 6, 24, 48, cup);
+      g->fillRect(left - 14, top + 6, 24, 8, cupDark);
+      g->fillRect(right - 10, top + 6, 24, 8, cupDark);
+      for (int i = 0; i < 3; i++) {  // note che salgono
+        float age = fmodf(wts * 0.7f + i * 0.33f, 1.0f);
+        int x = cx + (i - 1) * 70 + (int)(14 * sinf(wts * 3 + i));
+        int y = top - 28 - (int)(age * 60);
+        uint16_t c = scaled(i % 2 ? 255 : 150, i % 2 ? 200 : 220, i % 2 ? 120 : 255, 1.0f - age * 0.8f);
+        g->fillCircle(x, y, 5, c);
+        g->fillRect(x + 4, y - 18, 3, 18, c);
+        g->fillRect(x + 4, y - 18, 9, 4, c);
+      }
+      break;
+    }
+    case WK_DEBUG: {
+      const int ky = top + 6 * U - 44;  // tastiera
+      const float bx = cx + 30 + 90 * sinf(wts * 1.3f);
+      const int lx = (int)bx, ly = ky + 6;
+      g->fillCircle(lx, ly, 22, RGB565(70, 100, 140));  // lente: il bug ingrandito
+      for (int k = 0; k < 4; k++) g->drawCircle(lx, ly, 22 + k, RGB565(205, 210, 222));
+      for (int k = -1; k <= 1; k++) g->drawLine(lx + 17 + k, ly + 17, lx + 36 + k, ly + 36, RGB565(150, 100, 60));
+      const uint16_t bug = RGB565(120, 210, 90);
+      for (int side = -1; side <= 1; side += 2)  // zampette che si agitano
+        for (int i = -1; i <= 1; i++) {
+          int dy2 = (int)(3 * sinf(wts * 30 + i * 2 + side));
+          g->drawLine(lx + side * 6, ly + i * 5, lx + side * 16, ly + i * 7 + dy2, bug);
+        }
+      g->fillEllipse(lx, ly + 1, 9, 12, bug);
+      g->fillCircle(lx, ly - 12, 5, bug);
+      g->fillCircle(lx - 2, ly - 13, 1, C_EYE);
+      g->fillCircle(lx + 2, ly - 13, 1, C_EYE);
+      break;
+    }
+    case WK_BUILD: {
+      const int hx = right;  // la mano destra
+      const int ay = top + 2 * U - (int)(p.armR * 50);
+      const int by = GROUND_Y;
+      g->fillRect(hx - 10, by - 12, 60, 12, RGB565(60, 62, 74));  // incudine: base, vita, piano
+      g->fillRect(hx + 2, by - 24, 36, 12, RGB565(60, 62, 74));
+      g->fillRect(hx - 14, by - 34, 68, 12, RGB565(110, 116, 134));
+      g->fillRect(hx + 54, by - 34, 14, 6, RGB565(110, 116, 134));  // corno
+      g->fillRect(hx + 13, ay + 12, 8, 68, RGB565(150, 100, 60));   // manico
+      g->fillRect(hx - 3, ay + 66, 40, 18, RGB565(170, 176, 190));  // testa del martello
+      float s = fmodf(wts * 1.1f, 1.0f);
+      if (s >= 0.72f) {  // scintille all'impatto
+        float age = (s - 0.72f) / 0.28f;
+        for (int i = 0; i < 7; i++) {
+          float a = -0.2f - i * 0.45f;
+          int sx = hx + 17 + (int)(cosf(a) * age * 46), sy = by - 38 + (int)(sinf(a) * age * 46 + age * age * 20);
+          g->fillRect(sx, sy, 4, 4, scaled(255, 210, 90, 1.0f - age));
+        }
+      }
+      break;
+    }
+    case WK_GEARS: {
+      drawGear(cx - 30, top - 40, 22, 8, wts * 1.4f, RGB565(150, 160, 182));
+      drawGear(cx + 9, top - 40, 17, 6, -wts * 1.4f * 22.0f / 17.0f + 0.3f, RGB565(205, 150, 90));
+      drawGear(cx + 33, top - 58, 12, 5, wts * 1.4f * 22.0f / 12.0f, RGB565(120, 190, 150));
+      break;
+    }
+    default:
+      drawSparks(ts, cx);
+      break;
+  }
+}
+
+// ---- Sub-agent: mini Clawd sparsi per lo schermo, coerenti con la scena ----
+// Ogni agente occupa un punto libero (angoli e fianchi, lontano da testo, anello e props di Clawd)
+// e fa la sua versione di cio' che fa Clawd: in lavoro ripete la variante corrente, in "penso" aspetta.
+struct AgentSlot { int16_t dx, dy; };  // rispetto a (CX, CY): centro in x, cima in y
+static const AgentSlot AG_LL = { -160, 52 }, AG_LR = { 160, 52 }, AG_UL = { -160, -112 }, AG_UR = { 160, -112 }, AG_ML = { -175, 10 };
+
+static void agentSlot(int i, int &x, int &y) {  // (non restituisce la struct: il prototipo automatico precede la sua definizione)
+  static const AgentSlot normal[4] = { AG_LL, AG_LR, AG_UL, AG_UR };
+  static const AgentSlot thinking[4] = { AG_LL, AG_LR, AG_UL, AG_ML };  // in alto a destra c'e' la nuvoletta
+  static const AgentSlot build[4] = { AG_LL, AG_UL, AG_UR, AG_ML };     // in basso a destra c'e' l'incudine
+  const AgentSlot &sl = state == S_THINKING ? thinking[i] : (state == S_WORKING && workAnim == WK_BUILD) ? build[i] : normal[i];
+  x = CX + sl.dx;
+  y = CY + sl.dy;
+}
+
+// attrezzo del mini, uguale a quello che usa Clawd nella variante di lavoro corrente
+static void drawMiniProp(int x, int top, int u, float ts, float ph) {
+  const int left = x - 5 * u, right = x + 5 * u;
+  switch (workAnim) {
+    case WK_PHONES: {  // cuffie e una nota
+      g->fillRect(left - 1, top - 4, 10 * u + 2, 3, RGB565(48, 52, 64));
+      g->fillRect(left - 4, top + u, 4, 2 * u + 2, RGB565(90, 140, 220));
+      g->fillRect(right, top + u, 4, 2 * u + 2, RGB565(90, 140, 220));
+      float age = fmodf(ts * 0.8f + ph, 1.0f);
+      g->fillCircle(x + (int)(8 * sinf(ts * 3 + ph)), top - 10 - (int)(age * 26), 2, scaled(255, 210, 130, 1.0f - age));
+      break;
+    }
+    case WK_DEBUG: {  // lente
+      const int lx = right + 2 * u + 6, ly = top + 4 * u;
+      for (int k = 0; k < 2; k++) g->drawCircle(lx, ly, 7 + k, RGB565(205, 210, 222));
+      g->fillCircle(lx, ly, 6, RGB565(70, 100, 140));
+      g->drawLine(lx + 5, ly + 5, lx + 11, ly + 11, RGB565(150, 100, 60));
+      break;
+    }
+    case WK_BUILD: {  // incudine e martello
+      const int by = top + 8 * u;
+      float sp = fmodf(ts * 1.1f + ph, 1.0f);
+      float lift = sp < 0.6f ? sp / 0.6f : (sp < 0.72f ? 1.0f - (sp - 0.6f) / 0.12f : 0.0f);
+      const int hx = right + u + 2;
+      g->fillRect(hx - 3, by - 6, 18, 6, RGB565(110, 116, 134));
+      const int hy = by - 10 - (int)(lift * 16);
+      g->fillRect(hx + 4, hy - 12, 3, 14, RGB565(150, 100, 60));
+      g->fillRect(hx - 1, hy - 14, 13, 6, RGB565(170, 176, 190));
+      break;
+    }
+    case WK_GEARS:  // un ingranaggio che gira
+      drawGear(right + 2 * u + 6, top + 3 * u, 6, 6, ts * 2.0f + ph, RGB565(150, 160, 182));
+      break;
+    default: {  // piccola tastiera davanti
+      const int ky = top + 5 * u + 2;
+      g->fillRect(x - 4 * u, ky, 8 * u, 4, RGB565(55, 58, 70));
+      for (int k = 0; k < 4; k++) {
+        bool lit = (((int)(ts * 11) * 7 + k * 13) % 5) == 0;
+        g->fillRect(x - 4 * u + 2 + k * 2 * u, ky + 1, u, 2, lit ? RGB565(255, 190, 120) : RGB565(95, 100, 118));
+      }
+      break;
+    }
+  }
+}
+
+void drawAgents(float ts) {
+  const int n = agentsN > 4 ? 4 : agentsN;
+  const bool working = state == S_WORKING;
+  for (int i = 0; i < n; i++) {
+    int x, y;
+    agentSlot(i, x, y);
+    const float ph = i * 1.7f;
+    if (working && workAnim == WK_PHONES) x += (int)(4 * sinf(ts * 3.2f + ph));  // ondeggiano a tempo
+    drawMini(x, y, 3, ts, ph, working ? 0 : 1);
+    if (working) {
+      drawMiniProp(x, y, 3, ts, ph);
+    } else {  // in attesa: tre puntini che si accendono a turno
+      const int active = ((int)(ts * 3) + i) % 3;
+      for (int k = 0; k < 3; k++) g->fillCircle(x - 8 + k * 8, y - 8, k == active ? 3 : 2, RGB565(120, 130, 160));
+    }
+  }
+}
+
 void drawClawdPage() {
   uint32_t t = millis();
   float ts = t / 1000.0f;
@@ -946,6 +1299,8 @@ void drawClawdPage() {
 
   idleActScheduler(t, night);
   float ats = (t - idleActStart) / 1000.0f;
+  workAnimScheduler(t);
+  float wts = (t - workAnimStart) / 1000.0f;
   switch (state) {
     case S_IDLE: {
       // gira per la scrivania, ogni tanto saluta
@@ -989,15 +1344,7 @@ void drawClawdPage() {
       if (blink) p.openK = 0.1f;
       break;
     case S_WORKING:
-      p.keyboard = true;
-      p.lookY = 10;
-      p.lookX = 10 * sinf(ts * 4);
-      p.openK = 0.7f;
-      p.armL = -0.35f + 0.3f * sinf(ts * 18);
-      p.armR = -0.35f + 0.3f * sinf(ts * 18 + PI);
-      p.dy = 1.5f * sinf(ts * 20);
-      p.legAmp = 5;
-      p.legPhase = ts * 20;
+      workPose(p, ts, wts);
       break;
     case S_ATTENTION:
       p.dy = -34 * fabsf(sinf(ts * 7));
@@ -1272,7 +1619,7 @@ void drawClawdPage() {
       drawThoughtBubble(ts, cx);
       break;
     case S_WORKING:
-      drawSparks(ts, cx);
+      drawWorkProps(cx, p, ts, wts);
       break;
     case S_ATTENTION: {
       int y = BODY_TOP - 70 + (int)p.dy;
@@ -1476,6 +1823,29 @@ void formatRemaining(int mins, char *out, size_t n) {
   else snprintf(out, n, "%dm", mins);
 }
 
+// colore lungo la scala dell'usage: verde (0) -> ambra (65%) -> rosso (100%). Lo usano sia le barre
+// qui sotto sia l'anello della schermata di Clawd: il colore dell'estremo dice a che punto sei.
+static uint16_t usageGrad(float f) {
+  if (f < 0) f = 0;
+  if (f > 1) f = 1;
+  const float k = f < 0.65f ? f / 0.65f : (f - 0.65f) / 0.35f;
+  const int r0 = f < 0.65f ? 110 : 255, g0 = f < 0.65f ? 220 : 190, b0 = f < 0.65f ? 150 : 70;
+  const int r1 = 255, g1 = f < 0.65f ? 190 : 90, b1 = f < 0.65f ? 70 : 85;
+  return RGB565((uint8_t)(r0 + (r1 - r0) * k), (uint8_t)(g0 + (g1 - g0) * k), (uint8_t)(b0 + (b1 - b0) * k));
+}
+
+// barra riempita per w pixel su W, con angoli arrotondati e il gradiente dell'usage
+static void fillUsageBar(int X, int y, int W, int H, int w) {
+  const int R = 8;
+  for (int x = 0; x < w; x++) {
+    int ins = 0;
+    int dl = R - x, dr = R - (w - 1 - x);  // distanza dai due estremi, dentro l'arrotondamento
+    int d = dl > dr ? dl : dr;
+    if (d > 0) ins = R - (int)sqrtf((float)(R * R - (d - 1) * (d - 1)));
+    g->fillRect(X + x, y + ins, 1, H - 2 * ins, usageGrad((float)x / W));
+  }
+}
+
 void drawBar(int y, const char *label, int pctv, int minsLeft) {
   const int X = 83, W = 300, H = 22;
   g->setTextSize(2);
@@ -1490,8 +1860,7 @@ void drawBar(int y, const char *label, int pctv, int minsLeft) {
   if (pctv >= 0) {
     int p = pctv > 100 ? 100 : pctv;
     int w = W * p / 100;
-    uint16_t c = pctv >= 85 ? RGB565(255, 100, 90) : pctv >= 60 ? RGB565(255, 190, 70) : RGB565(110, 220, 150);
-    if (w > 4) g->fillRoundRect(X, y, w, H, 8, c);
+    if (w > 4) fillUsageBar(X, y, W, H, w);
   }
   if (minsLeft >= 0) {
     char r[16];
@@ -1745,15 +2114,23 @@ void drawInfoPage() {
     snprintf(buf, sizeof(buf), "Batt %d%%%s", bp, batCharging() ? TR(TXT_CHARGING) : usbPresent() ? " USB" : "");
     centerText(buf, 336, 2, RGB565(170, 175, 195));
   }
-  centerText(__DATE__, 366, 1, RGB565(90, 100, 120));
+  if (audioAutoVol()) {  // volume automatico: rumore misurato e volume effettivo
+    int mdb = audioMicDb();
+    if (mdb >= 0) snprintf(buf, sizeof(buf), "Mic %d dB  Vol %u%%", mdb, (unsigned)audioEffectiveVolume());
+    else snprintf(buf, sizeof(buf), "Mic --  Vol %u%%", (unsigned)audioEffectiveVolume());
+    centerText(buf, 362, 2, RGB565(130, 140, 165));
+  }
+  centerText(__DATE__, 392, 1, RGB565(90, 100, 120));
 }
 
 // ---- Menu impostazioni (si apre tenendo premuto BOOT) ----
-int setFocus = 0;  // controllo evidenziato (tasti fisici): 0 volume, 1 luminosita', 2 standby, 3 lingua, 4 associa, 5 dimentica, 6 spegni, 7 esci
+// righe con - / + (ordine di visualizzazione), poi 4 bottoni: associa, dimentica, spegni, esci
+enum SetRow { SR_VOL, SR_AUTOVOL, SR_BRIGHT, SR_ROTATE, SR_STANDBY, SR_LANG, ST_ROWS };
+int setFocus = 0;  // controllo evidenziato (tasti fisici): 0..ST_ROWS-1 = righe, poi i 4 bottoni
 uint32_t setLastInput = 0;
 uint32_t btnFlashUntil = 0;  // feedback visivo del bottone premuto
-int btnFlashId = -1;
-const int SET_FOCUS_N = 8;
+int btnFlashId = -1;         // riga*2 (-) o riga*2+1 (+); i bottoni: ST_ROWS*2 + n
+const int SET_FOCUS_N = ST_ROWS + 4;
 static const uint16_t STANDBY_STEPS[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
 
 void saveBrightness() {
@@ -1813,6 +2190,14 @@ void actBright(int d, bool wrap) {
   userBrightness = (uint8_t)v;
   saveBrightness();
 }
+void actAutoVol() {
+  audioSetAutoVol(!audioAutoVol());
+  sfxPlay(SFX_TAP);
+}
+void actRotate() {
+  setAutoRotate(!autoRotate);
+  sfxPlay(SFX_TAP);
+}
 void actStandby(int d, bool wrap) {
   int n = sizeof(STANDBY_STEPS) / sizeof(STANDBY_STEPS[0]);
   int idx = standbyIndex() + d;
@@ -1850,23 +2235,25 @@ void settingsActivate() {
   setLastInput = millis();
   lastTouch = setLastInput;
   switch (setFocus) {
-    case 0: actVolume(1, true); break;
-    case 1: actBright(1, true); break;
-    case 2: actStandby(1, true); break;
-    case 3: actLang(1); break;
-    case 4: actPair(); break;
-    case 5: actUnpair(); break;
-    case 6: actOff(); break;
+    case SR_VOL: actVolume(1, true); break;
+    case SR_AUTOVOL: actAutoVol(); break;
+    case SR_BRIGHT: actBright(1, true); break;
+    case SR_ROTATE: actRotate(); break;
+    case SR_STANDBY: actStandby(1, true); break;
+    case SR_LANG: actLang(1); break;
+    case ST_ROWS + 0: actPair(); break;
+    case ST_ROWS + 1: actUnpair(); break;
+    case ST_ROWS + 2: actOff(); break;
     default: closeSettings(); break;
   }
 }
 
 // geometria
-static const int ST_ROW_Y[4] = { 56, 108, 160, 212 };
-const int ST_ROW_H = 46;
+static const int ST_ROW_Y[ST_ROWS] = { 56, 94, 132, 170, 208, 246 };
+const int ST_ROW_H = 36;
 const int ST_MINUS_X = -4, ST_PLUS_X = 106, ST_STEP_W = 46;  // relativi a CX
-static const int ST_BTN_Y[2] = { 270, 330 };
-const int ST_BTN_H = 52;
+static const int ST_BTN_Y[2] = { 292, 340 };
+const int ST_BTN_H = 42;
 
 static bool inRect(int px, int py, int x, int y, int w, int h, int pad = 6) {
   return px >= x - pad && px <= x + w + pad && py >= y - pad && py <= y + h + pad;
@@ -1876,19 +2263,23 @@ void settingsTouch(int sx, int sy) {
   setLastInput = millis();
   lastTouch = setLastInput;
   // righe con - / +
-  for (int r = 0; r < 4; r++) {
+  for (int r = 0; r < ST_ROWS; r++) {
     int y = ST_ROW_Y[r];
     int dir = 0;
-    if (inRect(sx, sy, CX + ST_MINUS_X, y, ST_STEP_W, ST_ROW_H)) dir = -1;
-    else if (inRect(sx, sy, CX + ST_PLUS_X, y, ST_STEP_W, ST_ROW_H)) dir = 1;
+    if (inRect(sx, sy, CX + ST_MINUS_X, y, ST_STEP_W, ST_ROW_H, 2)) dir = -1;
+    else if (inRect(sx, sy, CX + ST_PLUS_X, y, ST_STEP_W, ST_ROW_H, 2)) dir = 1;
     if (dir) {
       setFocus = r;
       btnFlashId = r * 2 + (dir > 0);
       btnFlashUntil = millis() + 150;
-      if (r == 0) actVolume(dir, false);
-      else if (r == 1) actBright(dir, false);
-      else if (r == 2) actStandby(dir, false);
-      else actLang(dir);
+      switch (r) {
+        case SR_VOL: actVolume(dir, false); break;
+        case SR_AUTOVOL: actAutoVol(); break;
+        case SR_BRIGHT: actBright(dir, false); break;
+        case SR_ROTATE: actRotate(); break;
+        case SR_STANDBY: actStandby(dir, false); break;
+        default: actLang(dir); break;
+      }
       return;
     }
   }
@@ -1896,8 +2287,8 @@ void settingsTouch(int sx, int sy) {
   for (int b = 0; b < 4; b++) {
     int x = CX + ((b & 1) ? 6 : -150), y = ST_BTN_Y[b >> 1];
     if (inRect(sx, sy, x, y, 144, ST_BTN_H)) {
-      setFocus = 4 + b;
-      btnFlashId = 8 + b;
+      setFocus = ST_ROWS + b;
+      btnFlashId = ST_ROWS * 2 + b;
       btnFlashUntil = millis() + 150;
       settingsActivate();
       return;
@@ -1926,8 +2317,8 @@ void drawSettingsPage() {
   bool fl = (int32_t)(btnFlashUntil - t) > 0;
   const uint16_t bg = RGB565(36, 42, 62), bgStep = RGB565(48, 56, 82);
   char v[16];
-  const char *labels[4] = { TR(TXT_VOLUME), TR(TXT_BRIGHT), TR(TXT_STANDBY), TR(TXT_LANGUAGE) };
-  for (int r = 0; r < 4; r++) {
+  const char *labels[ST_ROWS] = { TR(TXT_VOLUME), TR(TXT_AUTOVOL), TR(TXT_BRIGHT), TR(TXT_AUTOROT), TR(TXT_STANDBY), TR(TXT_LANGUAGE) };
+  for (int r = 0; r < ST_ROWS; r++) {
     int y = ST_ROW_Y[r];
     bool foc = setFocus == r;
     g->fillRoundRect(CX - 150, y, 300, ST_ROW_H, 14, RGB565(20, 24, 36));
@@ -1936,12 +2327,16 @@ void drawSettingsPage() {
     g->setTextColor(RGB565(170, 178, 200));
     g->setCursor(CX - 140, y + (ST_ROW_H - 14) / 2);
     g->print(labels[r]);
-    if (r == 0) {
+    if (r == SR_VOL) {
       if (audioVolume() == 0) snprintf(v, sizeof(v), "%s", TR(TXT_MUTE));
       else snprintf(v, sizeof(v), "%u%%", (unsigned)audioVolume());
-    } else if (r == 1) {
+    } else if (r == SR_AUTOVOL) {
+      snprintf(v, sizeof(v), "%s", audioAutoVol() ? "ON" : "OFF");
+    } else if (r == SR_BRIGHT) {
       snprintf(v, sizeof(v), "%d%%", (int)userBrightness * 100 / 255);
-    } else if (r == 2) {
+    } else if (r == SR_ROTATE) {
+      snprintf(v, sizeof(v), "%s", autoRotate ? "ON" : "OFF");
+    } else if (r == SR_STANDBY) {
       if (autoStandbyMin == 0) snprintf(v, sizeof(v), "%s", TR(TXT_NEVER));
       else snprintf(v, sizeof(v), "%um", (unsigned)autoStandbyMin);
     } else {
@@ -1952,10 +2347,10 @@ void drawSettingsPage() {
     centerTextAt(v, CX + 77, y + (ST_ROW_H - 14) / 2, 2, RGB565(235, 238, 248));
   }
   bool pairOpen = blePairingOpen(nullptr);
-  drawButton(CX - 150, ST_BTN_Y[0], 144, ST_BTN_H, pairOpen ? TR(TXT_CANCEL) : TR(TXT_PAIR), pairOpen ? RGB565(70, 90, 50) : RGB565(34, 70, 110), RGB565(235, 238, 248), setFocus == 4, fl && btnFlashId == 8);
-  drawButton(CX + 6, ST_BTN_Y[0], 144, ST_BTN_H, TR(TXT_FORGET), bg, RGB565(235, 238, 248), setFocus == 5, fl && btnFlashId == 9);
-  drawButton(CX - 150, ST_BTN_Y[1], 144, ST_BTN_H, TR(TXT_POWEROFF), RGB565(100, 36, 36), RGB565(255, 200, 190), setFocus == 6, fl && btnFlashId == 10);
-  drawButton(CX + 6, ST_BTN_Y[1], 144, ST_BTN_H, TR(TXT_EXIT), bg, RGB565(235, 238, 248), setFocus == 7, fl && btnFlashId == 11);
+  drawButton(CX - 150, ST_BTN_Y[0], 144, ST_BTN_H, pairOpen ? TR(TXT_CANCEL) : TR(TXT_PAIR), pairOpen ? RGB565(70, 90, 50) : RGB565(34, 70, 110), RGB565(235, 238, 248), setFocus == ST_ROWS, fl && btnFlashId == ST_ROWS * 2);
+  drawButton(CX + 6, ST_BTN_Y[0], 144, ST_BTN_H, TR(TXT_FORGET), bg, RGB565(235, 238, 248), setFocus == ST_ROWS + 1, fl && btnFlashId == ST_ROWS * 2 + 1);
+  drawButton(CX - 150, ST_BTN_Y[1], 144, ST_BTN_H, TR(TXT_POWEROFF), RGB565(100, 36, 36), RGB565(255, 200, 190), setFocus == ST_ROWS + 2, fl && btnFlashId == ST_ROWS * 2 + 2);
+  drawButton(CX + 6, ST_BTN_Y[1], 144, ST_BTN_H, TR(TXT_EXIT), bg, RGB565(235, 238, 248), setFocus == ST_ROWS + 3, fl && btnFlashId == ST_ROWS * 2 + 3);
   if ((int32_t)(toastUntil - t) > 0) centerText(toast, 394, 2, RGB565(255, 230, 140));
   else centerText(TR(TXT_SET_HINT), 400, 1, RGB565(110, 120, 140));
   if (canvas) canvas->flush();
@@ -1992,6 +2387,44 @@ void drawPairingPage(uint32_t code) {
   if (canvas) canvas->flush();
 }
 
+// ---- Anello usage: due cerchi concentrici attorno allo schermo ----
+// Esterno (spesso) = limite a 5 ore, interno (sottile) = limite settimanale. Partono da sinistra
+// (ore 9) e si riempiono in senso orario; il colore va da verde a rosso lungo il giro (usageGrad),
+// quindi il colore dell'estremo dice a che punto sei. Nel punto di partenza c'e' la legenda.
+
+// anello pieno al pctv%: traccia con cerchi concentrici, riempimento con punti da 1 grado
+static void drawRing(float R, int dotR, int pctv) {
+  const uint16_t track = RGB565(30, 33, 44);
+  for (int r = (int)R - dotR; r <= (int)R + dotR; r++) g->drawCircle(CX, CY, r, track);
+  const int steps = min(pctv, 100) * 360 / 100;
+  for (int i = 0; i <= steps; i++) {
+    float th = (-90.0f + i) * (float)DEG_TO_RAD;  // gradi dall'alto in senso orario, da ore 9
+    g->fillCircle(CX + (int)lroundf(R * sinf(th)), CY - (int)lroundf(R * cosf(th)), dotR, usageGrad(i / 360.0f));
+  }
+}
+
+// voce di legenda: un tratto spesso o sottile come l'anello che indica, poi la sigla
+static void drawRingLegend(int y, int barH, const char *name) {
+  const uint16_t c = RGB565(205, 210, 225);
+  g->fillRoundRect(CX - 206, y + 7 - barH / 2, 14, barH, barH / 2, c);
+  g->setTextSize(2);
+  g->setTextColor(c);
+  g->setCursor(CX - 186, y);
+  g->print(name);
+}
+
+void drawUsageRing() {
+  if (u5 < 0 && u7 < 0) return;  // senza dati (o senza abbonamento) niente anello
+  if (u5 >= 0) {
+    drawRing(228.0f, 3, u5);
+    drawRingLegend(CY - 22, 6, "5h");
+  }
+  if (u7 >= 0) {
+    drawRing(220.0f, 2, u7);
+    drawRingLegend(CY + 6, 3, TR(TXT_RING_WEEK));
+  }
+}
+
 // ---- Cornice: pagina corrente + indicatore ----
 void drawFrame() {
   uint32_t pk;
@@ -2023,6 +2456,7 @@ void drawFrame() {
     case PG_INFO: drawInfoPage(); break;
     default: drawClawdPage(); break;
   }
+  if (page == PG_CLAWD) drawUsageRing();
   // puntini di pagina
   for (int i = 0; i < PG_COUNT; i++)
     g->fillCircle(CX + (int)((i - (PG_COUNT - 1) / 2.0f) * 18), 440, i == page ? 4 : 2, i == page ? RGB565(210, 215, 230) : RGB565(70, 75, 90));
@@ -2168,11 +2602,26 @@ void handleLine(const char *line) {
   else if (startsWithCI(line, "done")) setState(S_DONE, argOf(line, 4));
   else if (startsWithCI(line, "sleep")) setState(S_SLEEP, "");
   else if (startsWithCI(line, "error")) setState(S_ERROR, "");
-  else if (startsWithCI(line, "agents")) agentsN = constrain(atoi(argOf(line, 6)), 0, 4);
+  else if (startsWithCI(line, "agents")) {
+    realAgentsN = constrain(atoi(argOf(line, 6)), 0, 4);
+    if (!demoActive) agentsN = realAgentsN;
+  }
   else if (startsWithCI(line, "pet")) setPetXp(atol(argOf(line, 3)));
   else if (startsWithCI(line, "stats")) sscanf(argOf(line, 5), "%d %d %d", &statCents, &statAdd, &statRm);
   else if (startsWithCI(line, "epoch")) setClockEpoch((uint32_t)strtoul(argOf(line, 5), nullptr, 10));
   else if (startsWithCI(line, "sound")) audioSetEnabled(atoi(argOf(line, 5)) != 0);
+  else if (startsWithCI(line, "autovol")) audioSetAutoVol(atoi(argOf(line, 7)) != 0);
+  else if (startsWithCI(line, "micdebug")) audioMicDebug(atoi(argOf(line, 8)) != 0);
+  else if (startsWithCI(line, "unlockall")) unlockAll = atoi(argOf(line, 9)) != 0;
+  else if (startsWithCI(line, "style")) {  // `style H G`: prova cappello e occhiali (non salvato)
+    int h = styleHat, v = styleGlasses;
+    sscanf(argOf(line, 5), "%d %d", &h, &v);
+    styleHat = constrain(h, 0, N_HATS - 1);
+    styleGlasses = constrain(v, 0, N_GLS - 1);
+  }
+  else if (startsWithCI(line, "demo")) demoSet(atoi(argOf(line, 4)));
+  else if (startsWithCI(line, "autorotate")) setAutoRotate(atoi(argOf(line, 10)) != 0);
+  else if (startsWithCI(line, "orientdebug")) imuOrientDebug(atoi(argOf(line, 11)) != 0);
   else if (startsWithCI(line, "todo")) sscanf(argOf(line, 4), "%d %d", &todoDone, &todoTotal);
   else if (startsWithCI(line, "msg")) parseMsg(argOf(line, 3));
   else if (startsWithCI(line, "today")) sscanf(argOf(line, 5), "%d %d %d", &todayPrompts, &todayTools, &todayMin);
@@ -2208,13 +2657,13 @@ void handleLine(const char *line) {
         alarmUntil = millis() + 4000;
         page = PG_CLAWD;
         lastTouch = millis();
-        sfxPlay(SFX_ALERT);
+        sfxPlay(SFX_ALARM);
         if (state == S_SLEEP) setState(S_IDLE, "");
       } else if (prev5 >= 85 && a >= 0 && a < 50) {  // la finestra si e' azzerata
         resetUntil = millis() + 4500;
         page = PG_CLAWD;
         lastTouch = millis();
-        sfxPlay(SFX_LEVEL);
+        sfxPlay(SFX_RESET);
         if (state == S_SLEEP) setState(S_IDLE, "");
       }
     }
@@ -2255,14 +2704,15 @@ void pollSerial() {
 
 // ---- Tasto BOOT: demo degli stati ----
 // ---- Demo animazioni: BOOT breve le scorre tutte ----
-// i nomi delle demo sono in lang.h (DEMO_0..DEMO_25)
-const int DEMO_N = 30;
+// i nomi delle demo sono in lang.h (DEMO_0..DEMO_34)
+const int DEMO_N = 35;
 // ripetizione automatica (ms) per gli effetti a tempo, 0 = resta finche' non premi
 static const uint16_t DEMO_PERIOD[DEMO_N] = {
   0, 0, 0, 2800, 0, 4500, 0, 0, 0, 0,
   0, 0, 6500, 7500, 4500, 4800, 4500, 4500,
   5000, 5500, 6000, 3200, 3500, 4000, 4500, 8500,
-  0, 0, 0, 0
+  0, 0, 0, 0,
+  0, 0, 0, 0, 0
 };
 
 void demoApply(int i) {
@@ -2274,6 +2724,8 @@ void demoApply(int i) {
   fxKind = FX_NONE;
   demoKind = DM_NONE;
   demoIdleAct = 0;
+  demoWorkAct = 0;
+  agentsN = (i == 1 || i == 2 || i >= 30) ? 4 : realAgentsN;  // la demo mostra i sub-agent in 'penso' e 'lavoro'
   page = PG_CLAWD;
   lastTouch = now;
   lastEvent = now;
@@ -2297,14 +2749,15 @@ void demoApply(int i) {
     case 16: startFx(FX_TESTOK); break;
     case 17: startFx(FX_COMPACT); break;
     case 18: lvlUpUntil = now + 3500; sfxPlay(SFX_LEVEL); break;
-    case 19: alarmPct = 92; alarmUntil = now + 4000; sfxPlay(SFX_ALERT); break;
-    case 20: resetUntil = now + 4500; sfxPlay(SFX_LEVEL); break;
+    case 19: alarmPct = 92; alarmUntil = now + 4000; sfxPlay(SFX_ALARM); break;
+    case 20: resetUntil = now + 4500; sfxPlay(SFX_RESET); break;
     case 21: petUntil = now + 1600; sfxPlay(SFX_HEART); break;
     case 22: laughUntil = now + 2000; sfxPlay(SFX_HEART); break;
     case 23: annoyUntil = now + 2500; sfxPlay(SFX_ERROR); break;
     case 24: dizzyUntil = now + 3000; sfxPlay(SFX_DIZZY); break;
     case 25: midnightUntil = now + 7000; sfxPlay(SFX_HEART); break;
     case 26: case 27: case 28: case 29: demoIdleAct = i - 25; break;
+    case 30: case 31: case 32: case 33: case 34: setState(S_WORKING, "Bash"); demoWorkAct = i - 29; break;
     default: break;
   }
   char b[24];
@@ -2320,6 +2773,22 @@ void demoNext() {
   demoApply(demoIdx);
 }
 
+// comando seriale `demo N`: avvia la voce N della demo (1-based, come nel messaggio a schermo); 0 la chiude
+void demoSet(int n) {
+  if (n <= 0) {
+    demoActive = false;
+    demoKind = DM_NONE;
+    demoIdleAct = 0;
+    demoWorkAct = 0;
+    agentsN = realAgentsN;
+    return;
+  }
+  demoActive = true;
+  demoIdx = (n > DEMO_N ? DEMO_N : n) - 1;
+  demoEnds = millis() + 60000;
+  demoApply(demoIdx);
+}
+
 // da chiamare nel loop: ripete gli effetti a tempo e chiude la demo dopo un minuto di inattivita'
 void demoService(uint32_t now) {
   if (!demoActive) return;
@@ -2327,6 +2796,8 @@ void demoService(uint32_t now) {
     demoActive = false;
     demoKind = DM_NONE;
     demoIdleAct = 0;
+    demoWorkAct = 0;
+    agentsN = realAgentsN;
     return;
   }
   if (demoRetrig != 0x7fffffffu && (int32_t)(now - demoRetrig) >= 0) demoApply(demoIdx);
@@ -2412,15 +2883,15 @@ void cycleColor() {
   }
 }
 void cycleHat() {
-  for (int i = 1; i <= 4; i++) {
-    int h = (styleHat + i) % 4;
-    if (HAT_LVL[h] <= petLevel) { styleHat = h; break; }
+  for (int i = 1; i <= N_HATS; i++) {
+    int h = (styleHat + i) % N_HATS;
+    if (HAT_LVL[h] <= STYLE_LVL) { styleHat = h; break; }
   }
 }
 void cycleGlasses() {
-  for (int i = 1; i <= 4; i++) {
-    int v = (styleGlasses + i) % 4;
-    if (GLS_LVL[v] <= petLevel) { styleGlasses = v; break; }
+  for (int i = 1; i <= N_GLS; i++) {
+    int v = (styleGlasses + i) % N_GLS;
+    if (GLS_LVL[v] <= STYLE_LVL) { styleGlasses = v; break; }
   }
 }
 
@@ -2434,7 +2905,7 @@ void startFx(uint8_t kind) {
   fxKind = kind;
   fxStart = now;
   fxUntil = now + (kind == FX_PUSH ? 3300 : 3000);
-  sfxPlay(kind == FX_PUSH ? SFX_LEVEL : kind == FX_COMPACT ? SFX_TAP : kind == FX_COMMIT ? SFX_HEART : SFX_DONE);
+  sfxPlay(kind == FX_PUSH ? SFX_PUSH : kind == FX_COMPACT ? SFX_COMPACT : kind == FX_COMMIT ? SFX_COMMIT : SFX_TESTOK);
   if (state == S_SLEEP) setState(S_IDLE, "");
   if (ago(now, lastTouch) > 15000) page = PG_CLAWD;  // se stai leggendo qualcosa non ti sposta
 }
@@ -2526,6 +2997,7 @@ void pollTouch() {
   if (Wire.endTransmission() != 0) return;
   int16_t x, y;
   bool pressed = touch.getPoint(&x, &y, 1) > 0;
+  if (pressed) touchToLogical(x, y);
   if (touchDebug) {
     if (pressed) Serial.printf("T %u %d %d\n", (unsigned)now, (int)x, (int)y);
     else Serial.printf("U %u was=%d dx=%d dy=%d\n", (unsigned)now, (int)wasPressed, (int)(xl - x0), (int)(yl - y0));
@@ -2539,6 +3011,7 @@ void pollTouch() {
     onGesture(xl - x0, yl - y0, now - t0, x0, y0);
   }
   wasPressed = pressed;
+  touchHeld = pressed;
 }
 
 // ---- Setup / loop ----
@@ -2570,11 +3043,12 @@ void setup() {
     Preferences pf;
     pf.begin("claudebuddy", true);
     styleColor = pf.getUChar("col", 0) % N_COLORS;
-    styleHat = pf.getUChar("hat", 3) % 4;
-    styleGlasses = pf.getUChar("gls", 2) % 4;
+    styleHat = pf.getUChar("hat", 3) % N_HATS;
+    styleGlasses = pf.getUChar("gls", 2) % N_GLS;
     autoStandbyMin = pf.getUShort("asb", 10);
     userBrightness = pf.getUChar("bri", 120);
     gLang = pf.getUChar("lang", LANG_IT) % LANG_COUNT;
+    autoRotate = pf.getBool("arot", false);
     pf.end();
   }
   uint32_t r = rtcGet();  // ora dell'RTC (resta giusta anche a PC spento)
@@ -2586,7 +3060,7 @@ void setup() {
   setState(S_IDLE, "");
   bootStart = millis();
   bootEnd = bootStart + 3300;
-  sfxPlay(SFX_LEVEL);
+  sfxPlay(SFX_BOOT);
 }
 
 void loop() {
@@ -2628,6 +3102,12 @@ void loop() {
     lastTouch = now;
     sfxPlay(SFX_DIZZY);
     if (state == S_SLEEP) setState(S_IDLE, "");
+  }
+
+  // orientamento automatico: il bordo in alto lo decide l'IMU (mai a meta' di un gesto)
+  if (autoRotate && !touchHeld) {
+    int o = imuOrientation(now);
+    if (o >= 0) applyRotation((uint8_t)o);
   }
 
   batUpdate(now);

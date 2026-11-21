@@ -26,6 +26,12 @@ NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 DEVICE_NAME = "Claude Buddy"
 SCAN_S = 6
 RETRY_S = 6
+RETRY_MAX_S = 30        # scheda spenta/lontana: scansioni sempre piu' rade, mai riavvii
+FAIL_RESTART = 4        # la scheda si vede ma la connessione fallisce/si blocca N volte di fila
+RESTART_MIN_S = 600     # al massimo un riavvio ogni 10 minuti
+SCAN_HARD_S = SCAN_S + 10
+CONNECT_HARD_S = 30
+WRITE_HARD_S = 10
 IDLE_EXIT_S = 2 * 3600
 LOG_FILE = os.path.join(buddy.STATE_DIR, "ble.log")
 # comandi "una tantum": se la scheda non e' connessa si scartano (non vanno rieseguiti dopo)
@@ -56,6 +62,7 @@ class Bridge:
         self.queue = asyncio.Queue(maxsize=64)
         self.last_hook = time.time()
         self.stop = asyncio.Event()
+        self.restart = False
 
     @property
     def connected(self):
@@ -102,21 +109,28 @@ class Bridge:
     async def write(self, client, data):
         size = max(20, min((getattr(client, "mtu_size", 23) or 23) - 3, 240))
         for i in range(0, len(data), size):
-            await client.write_gatt_char(NUS_RX, data[i:i + size], response=True)
+            await asyncio.wait_for(client.write_gatt_char(NUS_RX, data[i:i + size], response=True), WRITE_HARD_S)
 
     async def ble_loop(self):
+        misses = 0   # scansioni senza trovare la scheda (spenta o lontana: solo attesa piu' lunga)
+        fails = 0    # scheda vista ma connessione fallita o bloccata (stato BLE di Windows incastrato)
         while not self.stop.is_set():
             try:
-                dev = await self.find_device()
+                dev = await asyncio.wait_for(self.find_device(), SCAN_HARD_S)
             except Exception as e:
                 log("scansione: %r" % e)
                 dev = None
             if dev is None:
-                await self.sleep(RETRY_S)
+                misses += 1
+                await self.sleep(min(RETRY_S * misses, RETRY_MAX_S))
                 continue
+            misses = 0
+            ok = False
             try:
                 async with BleakClient(dev, timeout=15) as client:
                     log("connesso a %s" % dev.address)
+                    ok = True
+                    fails = 0
                     self.client = client
                     while not self.queue.empty():
                         self.queue.get_nowait()
@@ -134,7 +148,14 @@ class Bridge:
                 if self.client is not None:
                     log("disconnesso")
                 self.client = None
-            await self.sleep(2)
+            if not ok:
+                fails += 1
+                if fails >= FAIL_RESTART and time.time() - float(os.environ.get("BUDDY_LAST_RESTART", "0")) > RESTART_MIN_S:
+                    log("%d connessioni fallite con la scheda in vista: riavvio il demone" % fails)
+                    self.restart = True
+                    self.stop.set()
+                    return
+            await self.sleep(2 if ok else min(2 + 3 * fails, 15))
 
     async def sleep(self, s):
         try:
@@ -150,9 +171,14 @@ class Bridge:
                 self.stop.set()
 
     async def run(self):
-        try:
-            server = await asyncio.start_server(self.on_hook, "127.0.0.1", buddy.BLE_PORT)
-        except OSError:
+        server = None
+        for _ in range(10):  # dopo un riavvio il vecchio socket puo' metterci un attimo a liberarsi
+            try:
+                server = await asyncio.start_server(self.on_hook, "127.0.0.1", buddy.BLE_PORT)
+                break
+            except OSError:
+                await asyncio.sleep(0.5)
+        if server is None:
             return  # un altro demone e' gia' attivo
         log("demone avviato")
         tasks = [asyncio.create_task(self.ble_loop()), asyncio.create_task(self.watchdog())]
@@ -165,7 +191,12 @@ class Bridge:
 
 
 if __name__ == "__main__":
+    bridge = Bridge()
     try:
-        asyncio.run(Bridge().run())
+        asyncio.run(bridge.run())
     except Exception as e:
         log("errore fatale: %r" % e)
+    if bridge.restart:  # rilancia se stesso da zero (azzera lo stato BLE incastrato)
+        os.environ["BUDDY_LAST_RESTART"] = str(time.time())
+        time.sleep(1)
+        os.execv(sys.executable, [sys.executable] + sys.argv)

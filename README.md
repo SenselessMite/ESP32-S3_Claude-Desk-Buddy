@@ -22,7 +22,7 @@ settings menu); the code comments are in Italian and the documentation is in Eng
 |---|---|
 | Idle | walks around and waves; every so often it picks a **random activity** (plays with a ball, reads a book, has a coffee, dances to music); after 1 minute it gets bored and yawns; at night it says "Buonanotte" and falls asleep early |
 | Thinking | hand on chin and a thought bubble |
-| Working | types on a keyboard with sparks; a **scrolling line** below shows the detail (command, file, pattern...) |
+| Working | picks one of **six ways of working** at random and changes every 12-22 s (see below); a **scrolling line** below shows the detail (command, file, pattern...) |
 | Oops! | a tool failed: shakes its head with a "?" |
 | Needs you! | jumps, pulsing yellow background and a message ("Permesso: Bash") |
 | Done! | jumps for joy among confetti |
@@ -31,14 +31,29 @@ settings menu); the code comments are in Italian and the documentation is in Eng
 | Memory full | puffs up when the context goes over 90% |
 | Cold cache | shivers when the prompt cache has expired |
 | Tired | heavy eyes and sweat when usage is close to the limit; **red alarm** at 90% and "Puoi ripartire!" when it resets |
-| Sub-agents | a mini Clawd above its head for each active agent |
+| Sub-agents | one mini Clawd per active agent (up to 4), placed around the screen in the free corners and sides according to the scene, doing a small version of what Clawd is doing (typing, dancing with headphones, hunting the bug, hammering, turning a gear); while Clawd is thinking they wait with blinking dots |
 | Task list | "Task 3/7" with a bar, from `TodoWrite` |
 | Low battery | slumps, sweats and shows a blinking battery with "Batteria scarica!" below 15% and again below 5% |
 | Charge complete | celebrates with a full battery and "Carica completa!" |
 
-Clawd **levels up** with use (cap at level 3, glasses at 6, crown at 10, colors to unlock) and also
+**Ways of working** (random, never the same twice in a row; the classic one is the most frequent): *typing*
+on the keyboard with sparks, *turbo* (frowning, fast hands, sweat), *headphones* (sways to the music with notes
+floating up), *bug hunt* (chases a bug along the keyboard with a magnifying glass), *hammer* (strikes an anvil with
+sparks) and *gears* (watches three gears turn above its head). The variant does not change between tool calls,
+only when its time is up or after a long pause. Each one has its own entry in the BOOT animation demo.
+
+Clawd **levels up** with use (cap at level 3, glasses at 6, crown at 10, colors to unlock; more accessories later: top hat 4, chef hat 5, propeller beanie 7, wizard hat 8, heart glasses 4, 3D glasses 5, sunglasses 8, monocle 9) and also
 reacts to you: a tap pets it, it laughs after 3 taps, gets annoyed after 6, gets dizzy if you shake
-it, and celebrates at midnight. There are sounds for the main events.
+it, and celebrates at midnight. Every main event has its own little tune, played by a small
+synthesizer (bell-like timbre, chords, glides and soft envelopes instead of plain beeps): power on,
+attention, done, error, commit, push, tests passed, compaction, usage alarm, limit reset, level up...
+
+**Usage ring:** on the Clawd screen two concentric rings run around the edge of the display: the thick
+**outer** one is the 5-hour limit, the thin **inner** one the weekly limit (two different limits, not a
+total). Both start at 9 o'clock and fill clockwise; a small legend at the start says which is which. The
+color shifts along the ring from green through amber (65%) to red (100%), so the color at the tip tells
+you how close you are to the limit. The bars on the Usage page use the same gradient. Nothing is drawn
+without usage data (the limits only come with a Claude.ai subscription).
 
 ### Pages (swipe horizontally)
 
@@ -50,7 +65,7 @@ Clawd · **Sessions** · **Usage** · **Today** · **Timer** · **Message** · *
 - **Today**: prompts, tools, working hours, cost, lines, level.
 - **Timer**: 25/5 pomodoro (tap = start/pause, long press = reset).
 - **Message**: Claude's last reply, with vertical scrolling.
-- **Style**: four buttons (Color, Hat, Glasses incl. pixel "Thug Life" shades, Sound), each changes its value on every tap. Also
+- **Style**: four buttons (Color, Hat, Glasses incl. pixel "Thug Life" shades, Sound; 8 hats and 8 glasses in total, locked ones are skipped), each changes its value on every tap. Also
   opens by long-pressing Clawd.
 - **Info**: PC and chip status (touch, audio, motion, RTC, PMU, BLE, USB), memory, version.
 
@@ -61,20 +76,36 @@ Clawd screen.
 
 | Button | Gesture | Effect |
 |---|---|---|
-| **BOOT** | short press | plays the **next Clawd animation** (30 in total) as a demo/test |
+| **BOOT** | short press | plays the **next Clawd animation** (35 in total) as a demo/test |
 | **BOOT** | long press (~1 s) | opens/closes the **settings menu** |
 | **POWER** | short press | **standby** (screen off) / wake |
 | **POWER** | long press (1.5 s) | **power off** (press POWER to turn on again) |
 | **POWER** | 6 s | hardware forced shutdown by the PMU (last resort) |
 
-**Settings menu** (long-press BOOT): *Volume*, *Brightness*, *Standby* and *Language* (IT/EN/FR/DE/ES)
-have **-** / **+** buttons, followed by the *Pair PC*, *Forget*, *Power off* and *Exit* buttons. Everything works by
+**Settings menu** (long-press BOOT): *Volume*, *Auto vol.*, *Brightness*, *Rotation*, *Standby* and *Language* (IT/EN/FR/DE/ES)
+have **-** / **+** buttons (on *Auto vol.* and *Rotation* either one toggles ON/OFF), followed by the *Pair PC*, *Forget*, *Power off* and *Exit* buttons. Everything works by
 touch; with the physical buttons, a short BOOT press moves to the next control and a short POWER
 press activates it (on values it steps them forward). It closes by itself after 30 s and the values
 are saved to flash.
 
+**Auto volume** (off by default): the board's microphones (ES7210 ADC, initialized by the firmware) listen to the room every couple of seconds
+while it is not playing a sound, and scales the *Volume* setting between 45% (quiet room, about 40 dB)
+and 120% (noisy room, about 66 dB), never above 100%. *Volume* therefore becomes the level you want in
+a normal room. The Info page shows the measured level and the volume actually used. The thresholds are
+estimates: send `micdebug 1` on the serial port to print the raw readings (`MIC samples=... rms=...`)
+and adjust the 40/66 dB constants in `micMeasure()` (`hw.cpp`) if needed. If the microphone returns
+only silence three times in a row, auto volume gives up (volume stays as set) and retries after 5 minutes.
+
+**Auto rotation** (off by default): with *Rotation* ON the accelerometer decides which edge of the
+display is up, and both the drawing and the touch coordinates rotate in steps of 90 degrees (the board
+keeps its current orientation while it lies flat, and never turns in the middle of a touch). The axes of
+the accelerometer relative to the display are not documented, so the mapping is in `IMU_EDGE_AXIS` /
+`IMU_EDGE_SIGN` in `board.h`: send `orientdebug 1` on the serial port, tilt the board and compare
+`gx`/`gy` with the edge that is up. If the screen turns the wrong way, swap the signs of the right and
+left edges (or of top and bottom).
+
 **Animation demo:** every short BOOT press (outside the menu) shows the next animation with its
-number and name (30 in total: states, idle activities, bored/tired/memory full/cold cache, battery cases,
+number and name (35 in total: states, idle activities, bored/tired/memory full/cold cache, battery cases,
 commit/push/tests/compaction, level up, usage alarm, petting, laughing, annoyed, dizzy, midnight...). Timed effects
 repeat, and the demo ends after one minute without presses. While it runs, the PC does not change
 the scene.
@@ -157,7 +188,7 @@ copy host\transport.example.txt host\transport.txt      (it contains: ble)
 board is connected, otherwise USB). With `ble`/`auto` the first hook starts the **daemon**
 `host/ble_bridge.py` by itself; it keeps the connection open and receives updates from the hooks
 over a local socket (`127.0.0.1` only), so hooks stay fast. The first connection can take a few
-seconds (scan). The daemon exits after 2 hours without hooks and restarts on its own.
+seconds (scan). The daemon exits after 2 hours without hooks and restarts on its own. If the board is visible but the connection keeps failing (typical after flashing), the daemon relaunches itself (at most once every 10 minutes); if the board is off it just scans less and less often, without restarting.
 
 ```
 python host/buddy.py ble status    # daemon running? board connected?
@@ -218,6 +249,10 @@ updates the state, recomputes the overall one (priority: *needs you* > *working*
 | `msg age session\|text` · `tick text` | last message and scrolling line |
 | `fx seq age name` | one-shot event (commit, push, testok, testfail, compact) |
 | `epoch seconds` · `time HH:MM` · `bright 0-255` · `sound 0\|1` | clock, brightness, sound |
+| `autovol 0\|1` · `micdebug 0\|1` | auto volume on/off; print microphone readings on the serial port |
+| `unlockall 0\|1` · `style H G` | preview: unlock every accessory / show hat H and glasses G (0-7, not saved) |
+| `demo N` | start entry N (1-35) of the animation demo, `demo 0` leaves it |
+| `autorotate 0\|1` · `orientdebug 0\|1` | auto rotation on/off; print accelerometer readings on the serial port |
 | `standby` · `wake` · `off` · `autostandby minutes` | power (see above) |
 | `unpair` | forget the PCs paired over BLE |
 | `touchdebug 0\|1` | print touch coordinates on the serial port (diagnostics) |

@@ -49,6 +49,7 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(TXT_CACHECOLD,  "cache fredda",          "cache cold",            "cache froid",           "Cache kalt",            "cache fria") \
   X(TXT_FIVEH,      "Sessione 5 ore",        "5-hour session",        "Session 5 h",           "5-Std-Sitzung",         "Sesion 5 h") \
   X(TXT_WEEK,       "Settimana",             "Week",                  "Semaine",               "Woche",                 "Semana") \
+  X(TXT_RING_WEEK,  "7g",                    "7d",                    "7j",                    "7T",                    "7d") \
   X(TXT_CONTEXT,    "Contesto",              "Context",               "Contexte",              "Kontext",               "Contexto") \
   X(TXT_TODAYCOST,  "Oggi $%d.%02d  +%d -%d", "Today $%d.%02d  +%d -%d", "Auj. $%d.%02d  +%d -%d", "Heute $%d.%02d  +%d -%d", "Hoy $%d.%02d  +%d -%d") \
   X(TXT_LIMITS,     "limiti: solo abbonati", "limits: subscribers only", "limites: abonnes",    "Limits: nur Abo",       "limites: suscriptores") \
@@ -84,10 +85,18 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(HAT_1,          "Berretto",              "Cap",                   "Casquette",             "Kappe",                 "Gorra") \
   X(HAT_2,          "Corona",                "Crown",                 "Couronne",              "Krone",                 "Corona") \
   X(HAT_3,          "Auto",                  "Auto",                  "Auto",                  "Auto",                  "Auto") \
+  X(HAT_4,          "Cilindro",              "Top hat",               "Haut-forme",            "Zylinder",              "Chistera") \
+  X(HAT_5,          "Mago",                  "Wizard",                "Magicien",              "Zauberer",              "Mago") \
+  X(HAT_6,          "Cuoco",                 "Chef",                  "Cuisinier",             "Koch",                  "Cocinero") \
+  X(HAT_7,          "Elica",                 "Propeller",             "Helice",                "Propeller",             "Helice") \
   X(GLS_0,          "No",                    "No",                    "Non",                   "Nein",                  "No") \
   X(GLS_1,          "Si",                    "Yes",                   "Oui",                   "Ja",                    "Si") \
   X(GLS_2,          "Auto",                  "Auto",                  "Auto",                  "Auto",                  "Auto") \
   X(GLS_3,          "Thug Life",             "Thug Life",             "Thug Life",             "Thug Life",             "Thug Life") \
+  X(GLS_4,          "Sole",                  "Shades",                "Soleil",                "Sonne",                 "Sol") \
+  X(GLS_5,          "Cuori",                 "Hearts",                "Coeurs",                "Herzen",                "Corazon") \
+  X(GLS_6,          "Monocolo",              "Monocle",               "Monocle",               "Monokel",               "Monoculo") \
+  X(GLS_7,          "3D",                    "3D",                    "3D",                    "3D",                    "3D") \
   X(TXT_LEVEL_N,    "Livello %d",            "Level %d",              "Niveau %d",             "Level %d",              "Nivel %d") \
   X(TXT_PCDATA_S,   "PC: dati %us fa",       "PC: data %us ago",      "PC: donnees %us",       "PC: Daten %us",         "PC: datos %us") \
   X(TXT_PCDATA_M,   "PC: dati %um fa",       "PC: data %um ago",      "PC: donnees %um",       "PC: Daten %um",         "PC: datos %um") \
@@ -98,7 +107,9 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(TXT_MOTION,     "Moto",                  "Motion",                "Motion",                "Motion",                "Motion") \
   X(TXT_SETTINGS,   "Impostazioni",          "Settings",              "Reglages",              "Einstellungen",         "Ajustes") \
   X(TXT_VOLUME,     "Volume",                "Volume",                "Volume",                "Lautst.",               "Volumen") \
-  X(TXT_BRIGHT,     "Luminosita'",           "Brightness",            "Luminosite",            "Helligkeit",            "Brillo") \
+  X(TXT_AUTOVOL,    "Vol. auto",             "Auto vol.",             "Vol. auto",             "Auto-Vol.",             "Vol. auto") \
+  X(TXT_AUTOROT,    "Rotazione",             "Rotation",              "Rotation",              "Drehung",               "Rotacion") \
+  X(TXT_BRIGHT,     "Luminosita'",         "Brightness",            "Luminosite",            "Helligkeit",            "Brillo") \
   X(TXT_STANDBY,    "Standby",               "Standby",               "Veille",                "Standby",               "En espera") \
   X(TXT_LANGUAGE,   "Lingua",                "Language",              "Langue",                "Sprache",               "Idioma") \
   X(TXT_MUTE,       "muto",                  "mute",                  "muet",                  "stumm",                 "mudo") \
@@ -152,7 +163,12 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(DEMO_26, "Gioco a palla",   "Playing ball",  "Jeu de ballon", "Ballspiel",     "Pelota") \
   X(DEMO_27, "Lettura",         "Reading",       "Lecture",       "Lesen",         "Lectura") \
   X(DEMO_28, "Pausa caffe",     "Coffee break",  "Pause cafe",    "Kaffeepause",   "Cafe") \
-  X(DEMO_29, "Musica",          "Music",         "Musique",       "Musik",         "Musica")
+  X(DEMO_29, "Musica",          "Music",         "Musique",       "Musik",         "Musica") \
+  X(DEMO_30, "Turbo",           "Turbo",         "Turbo",         "Turbo",         "Turbo") \
+  X(DEMO_31, "Cuffie",          "Headphones",    "Casque",        "Kopfhoerer",    "Auriculares") \
+  X(DEMO_32, "Caccia al bug",   "Bug hunt",      "Chasse au bug", "Bug-Jagd",      "Caza de bug") \
+  X(DEMO_33, "Martello",        "Hammer",        "Marteau",       "Hammer",        "Martillo") \
+  X(DEMO_34, "Ingranaggi",      "Gears",         "Engrenages",    "Zahnraeder",    "Engranajes")
 
 enum StrId : uint16_t {
 #define X(id, ...) id,

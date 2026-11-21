@@ -15,6 +15,13 @@ enum Sfx : uint8_t {
   SFX_TIMER,     // timer finito
   SFX_DIZZY,     // scossa
   SFX_OFF,       // spegnimento
+  SFX_BOOT,      // accensione
+  SFX_COMMIT,    // commit riuscito
+  SFX_PUSH,      // push riuscito
+  SFX_TESTOK,    // test passati
+  SFX_COMPACT,   // compattazione del contesto
+  SFX_ALARM,     // usage oltre la soglia
+  SFX_RESET,     // limite azzerato
   SFX_COUNT
 };
 
@@ -30,8 +37,22 @@ void audioSetVolume(uint8_t pct);  // 0-100, salvato in flash (0 = muto)
 uint8_t audioVolume();
 bool audioEnabled();
 
+// volume automatico: il microfono misura il rumore della stanza e adatta il volume
+// (poco volume in una stanza silenziosa, di piu' se c'e' rumore). Salvato in flash.
+void audioSetAutoVol(bool on);
+bool audioAutoVol();
+int audioMicDb();               // rumore ambiente in dB (scala digitale), -1 = nessuna misura valida
+uint8_t audioEffectiveVolume(); // volume realmente usato (volume * fattore automatico), 0-100
+void audioMicDebug(bool on);    // stampa le misure sulla seriale (per tarare le soglie)
+
 // movimento: true quando la scheda viene scossa con forza (max una volta ogni 4 s)
 bool imuShaken(uint32_t nowMs);
+
+// orientamento: bordo dello schermo che guarda in su (0 alto, 1 destro, 2 basso, 3 sinistro),
+// cioe' il valore da dare a setRotation(). -1 se l'IMU manca. Chiamare spesso, insieme a imuShaken().
+int imuOrientation(uint32_t nowMs);
+void imuOrientationReset();     // torna a 0 (quando la funzione viene disattivata)
+void imuOrientDebug(bool on);   // stampa gx/gy e la rotazione scelta sulla seriale (per tarare board.h)
 
 // RTC: ora "a muro" locale come secondi dal 1970 (0 = ora non valida)
 bool rtcPresent();
