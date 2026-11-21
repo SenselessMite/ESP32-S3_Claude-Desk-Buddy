@@ -27,6 +27,7 @@ settings menu); the code comments are in Italian and the documentation is in Eng
 | Needs you! | jumps, pulsing yellow background and a message ("Permesso: Bash") |
 | Done! | jumps for joy among confetti |
 | Commit / Push / Tests pass | party with a green badge / a rocket taking off / thumbs up |
+| Git errors | **push rejected** (the rocket rises, runs out of fuel and falls back smoking), **conflict** (two branches collide and spark), **commit failed** (red cross badge, Clawd shakes its head) |
 | Compaction | squashes down and recovers while Claude compacts the context |
 | Memory full | puffs up when the context goes over 90% |
 | Cold cache | shivers when the prompt cache has expired |
@@ -76,7 +77,7 @@ Clawd screen.
 
 | Button | Gesture | Effect |
 |---|---|---|
-| **BOOT** | short press | plays the **next Clawd animation** (35 in total) as a demo/test |
+| **BOOT** | short press | plays the **next Clawd animation** (38 in total) as a demo/test |
 | **BOOT** | long press (~1 s) | opens/closes the **settings menu** |
 | **POWER** | short press | **standby** (screen off) / wake |
 | **POWER** | long press (1.5 s) | **power off** (press POWER to turn on again) |
@@ -247,11 +248,11 @@ updates the state, recomputes the overall one (priority: *needs you* > *working*
 | `agents N` · `todo done total` · `pet xp` | sub-agents, task list, experience |
 | `stats cents lines+ lines-` · `today prompts tools minutes` | today's cost and counters |
 | `msg age session\|text` · `tick text` | last message and scrolling line |
-| `fx seq age name` | one-shot event (commit, push, testok, testfail, compact) |
+| `fx seq age name` | one-shot event (commit, push, testok, testfail, compact, pushfail, conflict, commitfail) |
 | `epoch seconds` · `time HH:MM` · `bright 0-255` · `sound 0\|1` | clock, brightness, sound |
 | `autovol 0\|1` · `micdebug 0\|1` | auto volume on/off; print microphone readings on the serial port |
 | `unlockall 0\|1` · `style H G` | preview: unlock every accessory / show hat H and glasses G (0-7, not saved) |
-| `demo N` | start entry N (1-35) of the animation demo, `demo 0` leaves it |
+| `demo N` | start entry N (1-38) of the animation demo, `demo 0` leaves it |
 | `autorotate 0\|1` · `orientdebug 0\|1` | auto rotation on/off; print accelerometer readings on the serial port |
 | `standby` · `wake` · `off` · `autostandby minutes` | power (see above) |
 | `unpair` | forget the PCs paired over BLE |

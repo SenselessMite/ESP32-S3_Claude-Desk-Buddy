@@ -206,7 +206,7 @@ uint32_t bootStart = 0, bootEnd = 0; // animazione di avvio
 int todayPrompts = 0, todayTools = 0, todayMin = 0;  // contatori di oggi
 
 // eventi una tantum dal PC (commit, push, test, compattazione)
-enum Fx { FX_NONE, FX_COMMIT, FX_PUSH, FX_TESTOK, FX_TESTFAIL, FX_COMPACT };
+enum Fx { FX_NONE, FX_COMMIT, FX_PUSH, FX_TESTOK, FX_TESTFAIL, FX_COMPACT, FX_PUSHFAIL, FX_CONFLICT, FX_COMMITFAIL };
 uint8_t fxKind = FX_NONE;
 uint32_t fxStart = 0, fxUntil = 0;
 long fxSeq = -1;
@@ -860,6 +860,72 @@ void drawRocket(int cx, float since) {
   g->fillCircle(cx, y + 22, 7, RGB565(90, 160, 230));
 }
 
+// razzo di un push rifiutato: sale, si spegne in alto e ricade fumando
+void drawRocketFail(int cx, float since) {
+  const float up = 1.5f;
+  int y;
+  int x = cx;
+  bool burn = since < up;
+  if (burn) {
+    float k = since / up;
+    y = BODY_TOP - 60 - (int)(130.0f * k * k);
+  } else {
+    float k = (since - up) / 1.7f;
+    if (k > 1) k = 1;
+    y = BODY_TOP - 190 + (int)(130.0f * k * k);
+    x = cx + (int)(10 * sinf(since * 22) * (1.0f - k));
+    for (int i = 0; i < 4; i++) {  // fumo
+      float a = fmodf(since * 1.5f + i * 0.25f, 1.0f);
+      g->fillCircle(cx + (int)(14 * sinf(i * 2.0f + since * 6)), y + 20 + (int)(a * 50), 7 + (int)(6 * a), scaled(150, 154, 166, 1.0f - a));
+    }
+    if (k >= 1) return;
+  }
+  const uint16_t W = RGB565(235, 238, 245), R = RGB565(230, 80, 70);
+  if (burn) {
+    int fl = 14 + (int)(10 * fabsf(sinf(since * 40)));
+    g->fillTriangle(x - 9, y + 56, x + 9, y + 56, x, y + 56 + fl, RGB565(255, 170, 60));
+  }
+  g->fillRect(x - 12, y, 24, 56, W);
+  g->fillTriangle(x - 12, y + 2, x + 12, y + 2, x, y - 24, R);
+  g->fillTriangle(x - 12, y + 40, x - 24, y + 62, x - 12, y + 56, R);
+  g->fillTriangle(x + 12, y + 40, x + 24, y + 62, x + 12, y + 56, R);
+  g->fillCircle(x, y + 22, 7, RGB565(90, 160, 230));
+}
+
+// badge rosso con la croce (commit fallito)
+void drawCrossBadge(int x, int y) {
+  g->fillRoundRect(x - 22, y - 22, 44, 44, 10, RGB565(225, 70, 65));
+  for (int k = -2; k <= 2; k++) {
+    g->drawLine(x - 11, y - 11 + k, x + 11, y + 11 + k, RGB565_WHITE);
+    g->drawLine(x - 11, y + 11 + k, x + 11, y - 11 + k, RGB565_WHITE);
+  }
+}
+
+// conflitto: due rami si avvicinano, si scontrano e saltano le scintille
+void drawConflict(int cx, float since) {
+  const int y = BODY_TOP - 64;
+  float k = since / 0.9f;
+  if (k > 1) k = 1;
+  const int gap = 160 - (int)(140 * k);  // distanza dal centro delle due barre
+  const uint16_t bl = RGB565(90, 150, 235), orn = RGB565(240, 150, 70);
+  g->fillRoundRect(cx - gap - 80, y - 8, 80, 16, 8, bl);
+  g->fillRoundRect(cx + gap, y - 8, 80, 16, 8, orn);
+  g->fillCircle(cx - gap - 80, y, 11, bl);
+  g->fillCircle(cx + gap + 80, y, 11, orn);
+  if (since > 0.9f) {
+    float a = since - 0.9f;
+    for (int i = 0; i < 8; i++) {
+      float ang = i * 0.785f + 0.3f;
+      int r = 14 + (int)(a * 90);
+      g->fillRect(cx + (int)(r * cosf(ang)) - 3, y + (int)(r * sinf(ang)) - 3, 6, 6, scaled(255, 120, 90, a < 1.2f ? 1.0f : 0.4f));
+    }
+    for (int k2 = -3; k2 <= 3; k2++) {
+      g->drawLine(cx - 18, y - 18 + k2, cx + 18, y + 18 + k2, RGB565(235, 70, 65));
+      g->drawLine(cx - 18, y + 18 + k2, cx + 18, y - 18 + k2, RGB565(235, 70, 65));
+    }
+  }
+}
+
 void drawHeart(int x, int y, int s, uint16_t c) {
   g->fillCircle(x - s / 2, y, s / 2 + 1, c);
   g->fillCircle(x + s / 2, y, s / 2 + 1, c);
@@ -1467,6 +1533,28 @@ void drawClawdPage() {
         p.armR = 1.0f;  // pollice in su
         p.dy = 2 * sinf(ts * 3);
         break;
+      case FX_PUSHFAIL:
+        if (fsince < 1.5f) {
+          p.lookY = -14;
+          p.armL = p.armR = 0.9f + 0.1f * sinf(ts * 18);
+        } else {  // il razzo e' caduto: delusione
+          p.openK = 0.5f;
+          p.lookY = -8;
+          p.armL = p.armR = -0.3f;
+          p.dy = 3;
+        }
+        break;
+      case FX_CONFLICT:
+        p.brow = fsince > 0.9f ? 1 : 0;
+        p.openK = 0.8f;
+        p.dx = fsince > 0.9f ? 6 * sinf(ts * 32) : 0;
+        p.armL = p.armR = fsince > 0.9f ? 0.8f : 0.1f;
+        break;
+      case FX_COMMITFAIL:
+        p.openK = 0.55f;
+        p.dx = 7 * sinf(fsince * 14) * (fsince < 1.6f ? 1.0f : 0.0f);  // scuote la testa: no
+        p.armL = p.armR = -0.3f;
+        break;
       case FX_COMPACT:
         p.squash = 40 + (int)(28 * sinf(ts * 8));
         p.puff = p.squash / 4;
@@ -1597,6 +1685,17 @@ void drawClawdPage() {
         g->fillRect(cx + 5 * U + 10, ay - 20, 14, 22, C_CLAWD);
         break;
       }
+      case FX_PUSHFAIL:
+        drawRocketFail(cx, fsince);
+        if (fsince > 1.5f) drawSweat(cx + 86, BODY_TOP + 8, ts);
+        break;
+      case FX_CONFLICT:
+        drawConflict(cx, fsince);
+        break;
+      case FX_COMMITFAIL:
+        drawCrossBadge(cx + 84, BODY_TOP - 44);
+        drawSweat(cx + 86, BODY_TOP + 30, ts);
+        break;
       case FX_COMPACT:
         for (int i = 0; i < 8; i++) {  // frammenti che si stringono verso il centro
           float a = i * 0.785f, r = 150.0f * (1.0f - fmodf(ts * 1.2f + i * 0.125f, 1.0f));
@@ -1707,8 +1806,11 @@ void drawClawdPage() {
     centerText(b4, 372, 3, RGB565(255, 110, 100));
   } else if (uReset) centerText(TR(TXT_RESETOK), 372, 3, RGB565(110, 230, 150));
   else if (fxOn) {
-    const char *ft = fxKind == FX_COMMIT ? "Commit!" : fxKind == FX_PUSH ? "Push!" : fxKind == FX_TESTOK ? "Test ok!" : TR(TXT_COMPACT);
-    centerText(ft, 372, 3, RGB565(235, 232, 200));
+    const char *ft = fxKind == FX_COMMIT ? "Commit!" : fxKind == FX_PUSH ? "Push!" : fxKind == FX_TESTOK ? "Test ok!"
+                     : fxKind == FX_PUSHFAIL ? TR(TXT_FX_PUSHFAIL) : fxKind == FX_CONFLICT ? TR(TXT_FX_CONFLICT)
+                     : fxKind == FX_COMMITFAIL ? TR(TXT_FX_COMMITFAIL) : TR(TXT_COMPACT);
+    const bool bad = fxKind >= FX_PUSHFAIL;
+    centerText(ft, 372, 3, bad ? RGB565(255, 125, 105) : RGB565(235, 232, 200));
   }
   else if (annoyed) centerText(TR(TXT_ANNOYED), 372, 3, RGB565(255, 120, 100));
   else if (laugh) centerText(TR(TXT_LAUGH), 372, 3, RGB565(255, 230, 120));
@@ -2633,7 +2735,9 @@ void handleLine(const char *line) {
       fxSeq = seq;
       if (age <= 10) {
         uint8_t k = !strcmp(nm, "commit") ? FX_COMMIT : !strcmp(nm, "push") ? FX_PUSH : !strcmp(nm, "testok") ? FX_TESTOK
-                  : !strcmp(nm, "testfail") ? FX_TESTFAIL : !strcmp(nm, "compact") ? FX_COMPACT : FX_NONE;
+                  : !strcmp(nm, "testfail") ? FX_TESTFAIL : !strcmp(nm, "compact") ? FX_COMPACT
+                  : !strcmp(nm, "pushfail") ? FX_PUSHFAIL : !strcmp(nm, "conflict") ? FX_CONFLICT
+                  : !strcmp(nm, "commitfail") ? FX_COMMITFAIL : FX_NONE;
         if (k) startFx(k);
       }
     }
@@ -2704,15 +2808,16 @@ void pollSerial() {
 
 // ---- Tasto BOOT: demo degli stati ----
 // ---- Demo animazioni: BOOT breve le scorre tutte ----
-// i nomi delle demo sono in lang.h (DEMO_0..DEMO_34)
-const int DEMO_N = 35;
+// i nomi delle demo sono in lang.h (DEMO_0..DEMO_37)
+const int DEMO_N = 38;
 // ripetizione automatica (ms) per gli effetti a tempo, 0 = resta finche' non premi
 static const uint16_t DEMO_PERIOD[DEMO_N] = {
   0, 0, 0, 2800, 0, 4500, 0, 0, 0, 0,
   0, 0, 6500, 7500, 4500, 4800, 4500, 4500,
   5000, 5500, 6000, 3200, 3500, 4000, 4500, 8500,
   0, 0, 0, 0,
-  0, 0, 0, 0, 0
+  0, 0, 0, 0, 0,
+  5000, 4500, 4500
 };
 
 void demoApply(int i) {
@@ -2748,6 +2853,9 @@ void demoApply(int i) {
     case 15: startFx(FX_PUSH); break;
     case 16: startFx(FX_TESTOK); break;
     case 17: startFx(FX_COMPACT); break;
+    case 35: startFx(FX_PUSHFAIL); break;
+    case 36: startFx(FX_CONFLICT); break;
+    case 37: startFx(FX_COMMITFAIL); break;
     case 18: lvlUpUntil = now + 3500; sfxPlay(SFX_LEVEL); break;
     case 19: alarmPct = 92; alarmUntil = now + 4000; sfxPlay(SFX_ALARM); break;
     case 20: resetUntil = now + 4500; sfxPlay(SFX_RESET); break;
@@ -2904,8 +3012,8 @@ void startFx(uint8_t kind) {
   }
   fxKind = kind;
   fxStart = now;
-  fxUntil = now + (kind == FX_PUSH ? 3300 : 3000);
-  sfxPlay(kind == FX_PUSH ? SFX_PUSH : kind == FX_COMPACT ? SFX_COMPACT : kind == FX_COMMIT ? SFX_COMMIT : SFX_TESTOK);
+  fxUntil = now + (kind == FX_PUSH ? 3300 : kind == FX_PUSHFAIL ? 3600 : 3000);
+  sfxPlay(kind >= FX_PUSHFAIL ? SFX_ERROR : kind == FX_PUSH ? SFX_PUSH : kind == FX_COMPACT ? SFX_COMPACT : kind == FX_COMMIT ? SFX_COMMIT : SFX_TESTOK);
   if (state == S_SLEEP) setState(S_IDLE, "");
   if (ago(now, lastTouch) > 15000) page = PG_CLAWD;  // se stai leggendo qualcosa non ti sposta
 }

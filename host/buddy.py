@@ -34,7 +34,7 @@ evento si ricalcola lo stato complessivo e si manda alla scheda uno snapshot:
   msg <eta_s> <sessione>|<testo>   ultimo messaggio di Claude
   tick <testo>              riga scorrevole: cosa sta facendo Claude (o inizio ultimo messaggio)
   today <prompt> <tool> <minuti>   contatori di oggi
-  fx <seq> <eta_s> <nome>   evento una tantum: commit|push|testok|testfail|compact
+  fx <seq> <eta_s> <nome>   evento una tantum: commit|push|testok|testfail|compact|pushfail|conflict|commitfail
 """
 import json
 import os
@@ -307,17 +307,41 @@ def bash_fx(d):
     ti = d.get("tool_input")
     cmd = str(ti.get("command", "")) if isinstance(ti, dict) else ""
     out = text_of(d.get("tool_response"))
+    # un comando concatenato (git add && git commit && git push) vale come l'evento piu' importante: push > commit
+    if re.search(r"\bgit\s+(-\S+\s+)*push\b", cmd) and not re.search(r"rejected|error:|fatal:", out, re.I):
+        return "push"
     if re.search(r"\bgit\s+(-\S+\s+)*commit\b", cmd):
         if not re.search(r"nothing (added )?to commit|error:|fatal:", out, re.I):
             return "commit"
     elif re.search(r"\bgit\s+(-\S+\s+)*push\b", cmd):
-        if not re.search(r"rejected|error:|fatal:", out, re.I):
-            return "push"
+        return None
     elif TEST_CMD_RE.search(cmd):
         if FAIL_RE.search(out):
             return "testfail"
         if PASS_RE.search(out):
             return "testok"
+    return None
+
+
+PUSH_FAIL_RE = re.compile(r"rejected|non-fast-forward|failed to push|permission denied|authentication failed|could not read (username|password)|fatal:", re.I)
+CONFLICT_RE = re.compile(r"CONFLICT \(|automatic merge failed|could not apply|fix conflicts|unmerged paths|merge conflict", re.I)
+COMMIT_FAIL_RE = re.compile(r"hook .*failed|pre-commit|commit-msg|husky|please tell me who you are|empty (commit )?message|error:|fatal:", re.I)
+GIT_CONFLICT_CMD_RE = re.compile(r"\bgit\s+(-\S+\s+)*(merge|pull|rebase|cherry-pick|stash|checkout|switch|revert)\b")
+
+
+def git_fail_fx(d):
+    """Riconosce dal fallimento di un comando Bash un errore git: push rifiutato, conflitto, commit fallito."""
+    ti = d.get("tool_input")
+    cmd = str(ti.get("command", "")) if isinstance(ti, dict) else ""
+    if "git" not in cmd:
+        return None
+    out = (str(d.get("error") or "") + " " + text_of(d.get("tool_response")))[:6000]
+    if GIT_CONFLICT_CMD_RE.search(cmd) and CONFLICT_RE.search(out):
+        return "conflict"
+    if re.search(r"\bgit\s+(-\S+\s+)*push\b", cmd) and PUSH_FAIL_RE.search(out):
+        return "pushfail"
+    if re.search(r"\bgit\s+(-\S+\s+)*commit\b", cmd) and COMMIT_FAIL_RE.search(out):
+        return "commitfail"
     return None
 
 
@@ -395,6 +419,10 @@ def handle_hook(d):
                 ti = d.get("tool_input")
                 if d.get("tool_name") == "Bash" and isinstance(ti, dict) and TEST_CMD_RE.search(str(ti.get("command", ""))):
                     add_fx("testfail")
+                elif d.get("tool_name") == "Bash":
+                    gfx = git_fail_fx(d)
+                    if gfx:
+                        add_fx(gfx)
         elif ev in ("SubagentStart", "SubagentStop"):
             rec = load_json(session_path(sid)) or {"st": "I"}
             ag = live_agents(rec, time.time())

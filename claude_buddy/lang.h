@@ -34,6 +34,9 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(TXT_MIDNIGHT,   "Mezzanotte!",           "Midnight!",             "Minuit!",               "Mitternacht!",          "Medianoche!") \
   X(TXT_LEVEL_UP,   "Livello %d!",           "Level %d!",             "Niveau %d!",            "Level %d!",             "Nivel %d!") \
   X(TXT_TESTFAIL,   "Test falliti",          "Tests failed",          "Tests echoues",         "Tests fehlgeschl.",     "Tests fallidos") \
+  X(TXT_FX_PUSHFAIL,"Push rifiutato",        "Push rejected",         "Push refuse",           "Push abgelehnt",        "Push rechazado") \
+  X(TXT_FX_CONFLICT,"Conflitto!",            "Conflict!",             "Conflit !",             "Konflikt!",             "Conflicto!") \
+  X(TXT_FX_COMMITFAIL,"Commit fallito",        "Commit failed",         "Commit echoue",         "Commit fehlg.",         "Commit fallido") \
   X(TXT_FOCUS,      "Focus",                 "Focus",                 "Focus",                 "Fokus",                 "Foco") \
   X(TXT_BREAK,      "Pausa",                 "Break",                 "Pause",                 "Pause",                 "Pausa") \
   X(TXT_LV,         "Lv %d",                 "Lv %d",                 "Niv %d",                "Lv %d",                 "Nv %d") \
@@ -168,7 +171,10 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(DEMO_31, "Cuffie",          "Headphones",    "Casque",        "Kopfhoerer",    "Auriculares") \
   X(DEMO_32, "Caccia al bug",   "Bug hunt",      "Chasse au bug", "Bug-Jagd",      "Caza de bug") \
   X(DEMO_33, "Martello",        "Hammer",        "Marteau",       "Hammer",        "Martillo") \
-  X(DEMO_34, "Ingranaggi",      "Gears",         "Engrenages",    "Zahnraeder",    "Engranajes")
+  X(DEMO_34, "Ingranaggi",      "Gears",         "Engrenages",    "Zahnraeder",    "Engranajes") \
+  X(DEMO_35,        "Push rifiutato",        "Push rejected",         "Push refuse",           "Push abgelehnt",        "Push rechazado") \
+  X(DEMO_36,        "Conflitto git",         "Git conflict",          "Conflit git",           "Git-Konflikt",          "Conflicto git") \
+  X(DEMO_37,        "Commit fallito",        "Commit failed",         "Commit echoue",         "Commit fehlg.",         "Commit fallido")
 
 enum StrId : uint16_t {
 #define X(id, ...) id,
