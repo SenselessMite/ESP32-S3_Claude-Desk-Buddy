@@ -29,6 +29,8 @@ RETRY_S = 6
 RETRY_MAX_S = 30        # scheda spenta/lontana: scansioni sempre piu' rade, mai riavvii
 FAIL_RESTART = 4        # la scheda si vede ma la connessione fallisce/si blocca N volte di fila
 RESTART_MIN_S = 600     # al massimo un riavvio ogni 10 minuti
+MISS_RESTART = 12       # scansioni a vuoto (con hook recenti) prima di riavviare
+RETRY_MAX_FAIL_S = 60   # attesa massima tra tentativi falliti con la scheda in vista
 SCAN_HARD_S = SCAN_S + 10
 CONNECT_HARD_S = 30
 WRITE_HARD_S = 10
@@ -113,7 +115,8 @@ class Bridge:
 
     async def ble_loop(self):
         misses = 0   # scansioni senza trovare la scheda (spenta o lontana: solo attesa piu' lunga)
-        fails = 0    # scheda vista ma connessione fallita o bloccata (stato BLE di Windows incastrato)
+        fails = 0    # scheda vista ma connessione/scrittura fallita (stato BLE di Windows incastrato o associazione scaduta)
+        last_err = ""
         while not self.stop.is_set():
             try:
                 dev = await asyncio.wait_for(self.find_device(), SCAN_HARD_S)
@@ -122,40 +125,73 @@ class Bridge:
                 dev = None
             if dev is None:
                 misses += 1
+                # scheda mai vista ma il PC sta lavorando: lo scanner di Windows puo' essere incastrato
+                if misses >= MISS_RESTART and time.time() - self.last_hook < 600 and self.can_restart():
+                    log("scheda non vista da %d scansioni con hook recenti: riavvio il demone" % misses)
+                    self.restart = True
+                    self.stop.set()
+                    return
                 await self.sleep(min(RETRY_S * misses, RETRY_MAX_S))
                 continue
             misses = 0
-            ok = False
+            healthy = False   # almeno una scrittura riuscita
+            t_conn = time.time()
+            lost = asyncio.Event()
+            # dopo due fallimenti si forza una nuova scoperta dei servizi (la cache di Windows puo' essere sporca)
+            kwargs = {"winrt": {"use_cached_services": False}} if fails >= 2 and sys.platform == "win32" else {}
+            client = BleakClient(dev, disconnected_callback=lambda _c: lost.set(), services=[NUS_SERVICE],
+                                 timeout=15, **kwargs)
             try:
-                async with BleakClient(dev, timeout=15) as client:
-                    log("connesso a %s" % dev.address)
-                    ok = True
-                    fails = 0
-                    self.client = client
-                    while not self.queue.empty():
-                        self.queue.get_nowait()
-                    # snapshot fresco appena connessi
-                    await self.write(client, ("\n".join(buddy.build_snapshot()) + "\n").encode("ascii", "replace"))
-                    while client.is_connected and not self.stop.is_set():
-                        try:
-                            data = await asyncio.wait_for(self.queue.get(), 3)
-                        except asyncio.TimeoutError:
-                            continue
-                        await self.write(client, data)
+                await asyncio.wait_for(client.connect(), CONNECT_HARD_S)
+                log("connesso a %s" % dev.address)
+                self.client = client
+                while not self.queue.empty():
+                    self.queue.get_nowait()
+                # snapshot fresco appena connessi
+                await self.write(client, ("\n".join(buddy.build_snapshot()) + "\n").encode("ascii", "replace"))
+                healthy = True
+                fails = 0
+                last_err = ""
+                while client.is_connected and not lost.is_set() and not self.stop.is_set():
+                    try:
+                        data = await asyncio.wait_for(self.queue.get(), 2)
+                    except asyncio.TimeoutError:
+                        continue
+                    await self.write(client, data)
             except Exception as e:
-                log("connessione: %r (se la scheda non e' associata: Impostazioni > Bluetooth > Aggiungi dispositivo)" % e)
+                err = repr(e)
+                if err != last_err or fails % 10 == 0:  # niente righe identiche a raffica
+                    log("connessione: %s" % err)
+                last_err = err
             finally:
                 if self.client is not None:
                     log("disconnesso")
                 self.client = None
-            if not ok:
-                fails += 1
-                if fails >= FAIL_RESTART and time.time() - float(os.environ.get("BUDDY_LAST_RESTART", "0")) > RESTART_MIN_S:
-                    log("%d connessioni fallite con la scheda in vista: riavvio il demone" % fails)
-                    self.restart = True
-                    self.stop.set()
-                    return
-            await self.sleep(2 if ok else min(2 + 3 * fails, 15))
+                try:
+                    await asyncio.wait_for(client.disconnect(), 8)
+                except Exception:
+                    pass
+            lived = time.time() - t_conn
+            ok = healthy and lived >= 10   # una connessione che cade dopo pochi secondi non e' "riuscita"
+            if ok:
+                fails = 0
+                await self.sleep(2)
+                continue
+            fails += 1
+            if fails == 3:
+                log("3 fallimenti di fila con la scheda in vista: probabile associazione scaduta. Rimuovi \"Claude Buddy\" "
+                    "da Impostazioni > Bluetooth e riassocia dal menu della scheda (Impostazioni > Bluetooth)")
+            if fails >= FAIL_RESTART and self.can_restart():
+                log("%d connessioni fallite con la scheda in vista: riavvio il demone" % fails)
+                self.restart = True
+                self.stop.set()
+                return
+            # backoff: la scheda non va martellata (ogni tentativo la tiene sveglia e la scalda)
+            await self.sleep(min(3 * fails, RETRY_MAX_FAIL_S))
+
+    @staticmethod
+    def can_restart():
+        return time.time() - float(os.environ.get("BUDDY_LAST_RESTART", "0")) > RESTART_MIN_S
 
     async def sleep(self, s):
         try:

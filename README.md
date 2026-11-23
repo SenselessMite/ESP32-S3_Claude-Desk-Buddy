@@ -171,9 +171,11 @@ copy host\port.example.txt host\port.txt      (Windows)
 cp host/port.example.txt host/port.txt        (Linux/macOS)
 ```
 
-Write the board's port in `host/port.txt` (e.g. `COM7`; on Linux/macOS the full path, e.g.
-`/dev/ttyACM0`). The number can change if the board re-enumerates. **Close the IDE's Serial
-Monitor**: the port can only be opened by one application at a time.
+By default the port is **detected automatically** (Espressif USB device, VID `303A`; on
+Linux/macOS the first `/dev/ttyACM*` / `/dev/cu.usbmodem*`), so `host/port.txt` can be left
+empty or contain `auto`. To force a port, write it there (e.g. `COM7`, or `/dev/ttyACM0`); if
+that port no longer exists (the board re-enumerated), detection takes over. **Close the IDE's
+Serial Monitor**: the port can only be opened by one application at a time.
 
 ### 2b. BLE connection (optional, no cable)
 

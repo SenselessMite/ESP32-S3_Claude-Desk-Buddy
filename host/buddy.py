@@ -80,12 +80,75 @@ def clean(s, n):
     return s.strip()[:n]
 
 
+def _active_ports_windows():
+    """Porte COM attualmente presenti (non quelle ricordate da dispositivi scollegati)."""
+    import winreg
+    ports = set()
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DEVICEMAP\SERIALCOMM") as k:
+            for i in range(winreg.QueryInfoKey(k)[1]):
+                ports.add(str(winreg.EnumValue(k, i)[1]).upper())
+    except OSError:
+        pass
+    return ports
+
+
+def _espressif_ports_windows():
+    """Porte COM dei dispositivi USB Espressif (VID 303A: la USB nativa dell'ESP32-S3) collegati ora."""
+    import winreg
+    active = _active_ports_windows()
+    found = []
+    try:
+        usb = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\USB")
+    except OSError:
+        return found
+    with usb:
+        for i in range(winreg.QueryInfoKey(usb)[0]):
+            dev = winreg.EnumKey(usb, i)
+            if not dev.upper().startswith("VID_303A"):
+                continue
+            try:
+                with winreg.OpenKey(usb, dev) as dk:
+                    for j in range(winreg.QueryInfoKey(dk)[0]):
+                        with winreg.OpenKey(dk, winreg.EnumKey(dk, j) + r"\Device Parameters") as pk:
+                            name = str(winreg.QueryValueEx(pk, "PortName")[0]).upper()
+                            if name in active and name not in found:
+                                found.append(name)
+            except OSError:
+                continue
+    return found
+
+
+def detect_port():
+    """Porta seriale del buddy rilevata da sola ("" se non c'e')."""
+    try:
+        if os.name == "nt":
+            ports = _espressif_ports_windows()
+        else:
+            import glob
+            ports = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/cu.usbmodem*"))
+        return ports[0] if ports else ""
+    except Exception:
+        return ""
+
+
+def port_exists(port):
+    if os.name == "nt":
+        return port.upper() in _active_ports_windows()
+    return os.path.exists(port)
+
+
 def read_port():
+    """host/port.txt: una porta (COM7, /dev/ttyACM0) oppure vuoto / "auto" per il rilevamento automatico.
+    Se la porta scritta non esiste piu' (la scheda e' su un'altra porta) si ripiega sul rilevamento."""
     try:
         with open(os.path.join(HERE, "port.txt")) as f:
-            return f.read().strip()
+            p = f.read().strip()
     except OSError:
-        return ""
+        p = ""
+    if p and p.lower() != "auto" and port_exists(p):
+        return p
+    return detect_port() or (p if p.lower() != "auto" else "")
 
 
 def read_transport():

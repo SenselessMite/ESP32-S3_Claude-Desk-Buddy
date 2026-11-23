@@ -76,7 +76,7 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(TXT_STY_HAT,    "CAPPELLO",              "HAT",                   "CHAPEAU",               "HUT",                   "SOMBRERO") \
   X(TXT_STY_GLASS,  "OCCHIALI",              "GLASSES",               "LUNETTES",              "BRILLE",                "GAFAS") \
   X(TXT_STY_SOUND,  "SUONO",                 "SOUND",                 "SON",                   "TON",                   "SONIDO") \
-  X(TXT_ON,         "acceso",                "on",                    "actif",                 "an",                    "activo") \
+  X(TXT_STY_COSTUME, "COSTUME",              "COSTUME",               "COSTUME",               "KOSTUEM",               "DISFRAZ")   X(COS_0,          "Nessuno",               "None",                  "Aucun",                 "Keiner",                "Ninguno")   X(COS_1,          "Zelda",                 "Zelda",                 "Zelda",                 "Zelda",                 "Zelda")   X(COS_2,          "Dark Souls",            "Dark Souls",            "Dark Souls",            "Dark Souls",            "Dark Souls")   X(TXT_ON,         "acceso",                "on",                    "actif",                 "an",                    "activo") \
   X(TXT_OFF,        "spento",                "off",                   "coupe",                 "aus",                   "mudo") \
   X(COLOR_0,        "Arancio",               "Orange",                "Orange",                "Orange",                "Naranja") \
   X(COLOR_1,        "Blu",                   "Blue",                  "Bleu",                  "Blau",                  "Azul") \
@@ -124,7 +124,10 @@ static const char *const LANG_CODES[LANG_COUNT] = { "IT", "EN", "FR", "DE", "ES"
   X(TXT_EXIT,       "Esci",                  "Exit",                  "Quitter",               "Zurueck",               "Salir") \
   X(TXT_SET_HINT,   "BOOT: scorri  POWER: ok", "BOOT: next  POWER: ok", "BOOT: suiv.  POWER: ok", "BOOT: weiter  POWER: ok", "BOOT: sig.  POWER: ok") \
   X(TXT_FORGOT,     "PC dimenticati",        "PCs forgotten",         "PC oublies",            "PCs vergessen",         "PC olvidados") \
-  X(TXT_POWERING,   "Spegnimento...",        "Powering off...",       "Extinction...",         "Ausschalten...",        "Apagando...") \
+  X(TXT_SURE_FORGET, "Dimenticare i PC?",    "Forget all PCs?",       "Oublier les PC?",       "Alle PCs vergessen?",   "Olvidar los PC?") \
+  X(TXT_SURE_FORGET2, "Dovranno riassociarsi", "They must pair again",  "A reassocier ensuite",  "Neu koppeln noetig",    "Habra que vincular") \
+  X(TXT_SURE_OFF,   "Spegnere la scheda?",   "Power off?",            "Eteindre?",             "Ausschalten?",          "Apagar?") \
+  X(TXT_POWERING,"Spegnimento...",        "Powering off...",       "Extinction...",         "Ausschalten...",        "Apagando...") \
   X(TXT_PAIRING,    "Associazione",          "Pairing",               "Association",           "Kopplung",              "Vinculacion") \
   X(TXT_PAIR_L1,    "Sul PC apri",           "On the PC open",        "Sur le PC ouvre",       "Am PC oeffne",          "En el PC abre") \
   X(TXT_PAIR_L2,    "Bluetooth > Aggiungi",  "Bluetooth > Add",       "Bluetooth > Ajouter",   "Bluetooth > Hinzu",     "Bluetooth > Anadir") \

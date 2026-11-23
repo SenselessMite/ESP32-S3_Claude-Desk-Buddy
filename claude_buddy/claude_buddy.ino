@@ -31,6 +31,7 @@
 #include "board.h"
 #include "lang.h"
 #include "hw.h"
+#include "costumes.h"
 #include "ble.h"
 #include "TouchDrv.hpp"  // SensorLib: touch CST9217
 
@@ -91,6 +92,7 @@ struct Pose {
   bool keyboard = false;           // tastiera davanti (stato working)
   int brow = 0;                    // 1 = sopracciglia arrabbiate
   int puff = 0;                    // corpo "gonfio" (px per lato)
+  bool busyHands = false;          // le mani servono ad altro (tazza, tastiera...): il costume nasconde gli oggetti in mano
 };
 
 char clockText[6] = "";  // "HH:MM" oppure vuoto
@@ -187,7 +189,7 @@ const uint8_t GLS_LVL[] = { 1, 6, 1, 1, 8, 4, 9, 5 };
 const int N_HATS = sizeof(HAT_LVL), N_GLS = sizeof(GLS_LVL);
 bool unlockAll = false;  // comando `unlockall 1`: sblocca tutti gli accessori per provarli
 #define STYLE_LVL (unlockAll ? 99 : petLevel)
-uint8_t styleColor = 0, styleHat = 3, styleGlasses = 2;
+uint8_t styleColor = 0, styleHat = 3, styleGlasses = 2, styleCostume = 0;
 
 #define FW_VERSION "1.1"
 char ticker[124] = "";               // riga scorrevole in basso
@@ -248,6 +250,16 @@ uint32_t demoRetrig = 0, demoEnds = 0;
 #define demoOn(k) (demoActive && demoKind == (k))
 uint16_t autoStandbyMin = 10;  // a batteria, dopo N minuti a riposo e senza tocchi; 0 = mai
 
+// Frequenza CPU: 240 MHz solo quando serve (animazioni vivaci, tocco), 160 a riposo, 80 in standby.
+// Meno MHz = meno calore e batteria piu' lunga; il disegno a riposo e' comunque a fps ridotti.
+static uint16_t curCpuMhz = 240;
+static uint32_t cpuBusyUntil = 0;
+static void setCpu(uint16_t mhz) {
+  if (mhz == curCpuMhz) return;
+  curCpuMhz = mhz;
+  setCpuFrequencyMhz(mhz);
+}
+
 void enterStandby() {
   if (standby) return;
   standby = true;
@@ -257,12 +269,13 @@ void enterStandby() {
   panel->setBrightness(0);
   curBrightness = 0;
   panel->displayOff();
-  setCpuFrequencyMhz(80);
+  setCpu(80);
 }
 
 void exitStandby() {
   if (!standby) return;
-  setCpuFrequencyMhz(240);
+  setCpu(240);
+  cpuBusyUntil = millis() + 3000;
   panel->displayOn();
   standby = false;
   wokeByEvent = false;
@@ -355,15 +368,45 @@ bool isNight() {
   int h = clockHour();
   return h >= 23 || (h >= 0 && h < 6);
 }
+// costume attivo (0 = nessuno): sostituisce cappello, occhiali e colore finche' e' indossato
+int effCostume() {
+  return (styleCostume < N_COSTUMES && COSTUMES[styleCostume].lvl <= STYLE_LVL) ? styleCostume : 0;
+}
 int effHat() {
+  if (effCostume()) return 0;
   if (styleHat == 3) return STYLE_LVL >= 10 ? 2 : STYLE_LVL >= 3 ? 1 : 0;
   return HAT_LVL[styleHat] <= STYLE_LVL ? styleHat : 0;
 }
 // 0 nessuno, 1 tondi, 2 "Thug Life", 3 sole, 4 cuori, 5 monocolo, 6 3D
 int effGlasses() {
+  if (effCostume()) return 0;
   if (styleGlasses == 0 || GLS_LVL[styleGlasses] > STYLE_LVL) return 0;
   static const uint8_t kind[8] = { 0, 1, 1, 2, 3, 4, 5, 6 };  // "auto" = tondi appena sbloccati
   return kind[styleGlasses];
+}
+
+// disegna la tabella di forme di un costume (vedi costumes.h)
+static void drawCostumeShapes(const Shape *sh, uint8_t n, int cx, int top, int bottom, int left, int right,
+                              int ayL, int ayR, bool hideHeld) {
+  for (uint8_t i = 0; i < n; i++) {
+    const Shape &s = sh[i];
+    if ((s.an & AN_HELD) && hideHeld) continue;
+    int ox = cx, oy = top;
+    switch (s.an & 0x7F) {
+      case AN_BOTTOM: oy = bottom; break;
+      case AN_LEFT: ox = left; break;
+      case AN_RIGHT: ox = right; break;
+      case AN_ARML: ox = left; oy = ayL; break;
+      case AN_ARMR: ox = right; oy = ayR; break;
+      default: break;
+    }
+    switch (s.op) {
+      case SH_RECT: g->fillRect(ox + s.a, oy + s.b, s.c, s.d, s.col); break;
+      case SH_RRECT: g->fillRoundRect(ox + s.a, oy + s.b, s.c, s.d, s.e, s.col); break;
+      case SH_TRI: g->fillTriangle(ox + s.a, oy + s.b, ox + s.c, oy + s.d, ox + s.e, oy + s.f, s.col); break;
+      default: g->fillCircle(ox + s.a, oy + s.b, s.c, s.col); break;
+    }
+  }
 }
 
 void drawClawd(const Pose &p) {
@@ -379,6 +422,11 @@ void drawClawd(const Pose &p) {
   if (lift < 0) lift = 0;
   int sw = 5 * U - (int)(lift * 0.5f);
   g->fillEllipse(cx, GROUND_Y, sw, 9, RGB565(38, 38, 44));
+
+  const Costume &cos = COSTUMES[effCostume()];
+  const int ayL = top + 2 * U - (int)(p.armL * 50);  // cima dei bracci (anche per gli oggetti in mano)
+  const int ayR = top + 2 * U - (int)(p.armR * 50);
+  if (cos.nBack) drawCostumeShapes(cos.back, cos.nBack, cx, top, bottom, left, right, ayL, ayR, p.busyHands);  // dietro al corpo
 
   // zampette
   static const int legX[4] = { -4, -2, 1, 3 };
@@ -406,8 +454,6 @@ void drawClawd(const Pose &p) {
 
   // braccini
   const int aw = 34, ah = 40;
-  int ayL = top + 2 * U - (int)(p.armL * 50);
-  int ayR = top + 2 * U - (int)(p.armR * 50);
   g->fillRect(left - aw, ayL, aw, ah, C_CLAWD);
   g->fillRect(right, ayR, aw, ah, C_CLAWD);
 
@@ -532,6 +578,7 @@ void drawClawd(const Pose &p) {
     }
     g->fillRect(cx - 3 * U + 20 + (int)p.lookX, ecy - 3, 6 * U - 40, 4, fr);
   }
+  if (cos.nFront) drawCostumeShapes(cos.front, cos.nFront, cx, top, bottom, left, right, ayL, ayR, p.busyHands);  // sopra
 }
 
 void drawThoughtBubble(float ts, int cx) {
@@ -979,6 +1026,7 @@ void idleActScheduler(uint32_t t, bool night) {
 void idlePose(Pose &p, float ats) {
   float ts = millis() / 1000.0f;
   p = Pose();
+  p.busyHands = true;  // palla, libro, tazza, musica: niente spada e scudo
   switch (idleAct) {
     case ACT_BALL: {
       float ph = ats * 1.7f;
@@ -1111,6 +1159,7 @@ void workAnimScheduler(uint32_t t) {
 // posa di Clawd mentre lavora (wts = secondi dall'inizio della variante)
 void workPose(Pose &p, float ts, float wts) {
   p.keyboard = true;
+  p.busyHands = true;  // digita, usa martello, lente...
   p.lookY = 10;
   p.lookX = 10 * sinf(ts * 4);
   p.openK = 0.7f;
@@ -1531,6 +1580,7 @@ void drawClawdPage() {
       case FX_TESTOK:
         p.eye = EYE_HAPPY;
         p.armR = 1.0f;  // pollice in su
+        p.busyHands = true;  // il pollice prende il posto della spada
         p.dy = 2 * sinf(ts * 3);
         break;
       case FX_PUSHFAIL:
@@ -2104,13 +2154,16 @@ void saveStyle() {
   pf.putUChar("col", styleColor);
   pf.putUChar("hat", styleHat);
   pf.putUChar("gls", styleGlasses);
+  pf.putUChar("cos", styleCostume);
   pf.end();
 }
 
-// bottoni della pagina Stile (2x2, sotto Clawd)
-static const int STY_X[2] = { -148, 6 };
-static const int STY_Y[2] = { 290, 352 };
-const int STY_W = 142, STY_H = 54;
+// bottoni della pagina Stile, sotto Clawd: colore, cappello / occhiali, suono / costume (largo)
+const int STY_N = 5;
+static const int STY_BX[STY_N] = { -140, 6, -140, 6, -140 };  // relativi a CX
+static const int STY_BY[STY_N] = { 268, 268, 318, 318, 368 };
+static const int STY_BW[STY_N] = { 134, 134, 134, 134, 274 };
+const int STY_H = 46;
 uint32_t styFlashUntil = 0;
 int styFlashId = -1;
 
@@ -2123,25 +2176,27 @@ void drawStylePage() {
   p.armL = p.armR = 0.1f * sinf(ts * 2.2f);
   if (fmodf(ts, 4.2f) < 0.14f) p.openK = 0.1f;
   drawClawd(p);
-  const char *labels[4] = { TR(TXT_STY_COLOR), TR(TXT_STY_HAT), TR(TXT_STY_GLASS), TR(TXT_STY_SOUND) };
-  const char *vals[4] = { TR((StrId)(COLOR_0 + styleColor)), TR((StrId)(HAT_0 + styleHat)), TR((StrId)(GLS_0 + styleGlasses)), audioEnabled() ? TR(TXT_ON) : TR(TXT_OFF) };
-  for (int i = 0; i < 4; i++) {
-    int x = CX + STY_X[i & 1], y = STY_Y[i >> 1];
+  // ordine dei bottoni: 0 colore, 1 cappello, 2 occhiali, 3 suono, 4 costume
+  const char *labels[STY_N] = { TR(TXT_STY_COLOR), TR(TXT_STY_HAT), TR(TXT_STY_GLASS), TR(TXT_STY_SOUND), TR(TXT_STY_COSTUME) };
+  const char *vals[STY_N] = { TR((StrId)(COLOR_0 + styleColor)), TR((StrId)(HAT_0 + styleHat)), TR((StrId)(GLS_0 + styleGlasses)),
+                              audioEnabled() ? TR(TXT_ON) : TR(TXT_OFF), TR((StrId)(COS_0 + styleCostume)) };
+  for (int i = 0; i < STY_N; i++) {
+    int x = CX + STY_BX[i], y = STY_BY[i], w = STY_BW[i];
     bool fl = (int32_t)(styFlashUntil - t) > 0 && styFlashId == i;
-    g->fillRoundRect(x, y, STY_W, STY_H, 14, fl ? RGB565(90, 100, 135) : RGB565(36, 42, 62));
+    g->fillRoundRect(x, y, w, STY_H, 14, fl ? RGB565(90, 100, 135) : RGB565(36, 42, 62));
     g->setTextSize(1);
     g->setTextColor(RGB565(130, 140, 165));
-    g->setCursor(x + 14, y + 9);
+    g->setCursor(x + 12, y + 7);
     g->print(labels[i]);
     g->setTextSize(2);
     g->setTextColor(RGB565(235, 238, 248));
-    g->setCursor(x + 14, y + 26);
+    g->setCursor(x + 12, y + 21);
     g->print(vals[i]);
-    if (i == 0) g->fillCircle(x + STY_W - 22, y + STY_H / 2, 10, COLORS[styleColor].c);  // anteprima del colore
+    if (i == 0) g->fillCircle(x + w - 20, y + STY_H / 2, 9, COLORS[styleColor].c);  // anteprima del colore
   }
   char lv[16];
   snprintf(lv, sizeof(lv), TR(TXT_LEVEL_N), petLevel);
-  centerText(lv, 418, 1, RGB565(110, 120, 140));
+  centerText(lv, 422, 1, RGB565(110, 120, 140));
 }
 
 // ---- Animazione di avvio: Clawd "nasce" ----
@@ -2263,8 +2318,24 @@ void saveLang() {
   pf.end();
 }
 
+// conferma per le azioni difficili da annullare: 0 nessuna, 1 dimentica i PC, 2 spegni
+uint8_t confirmKind = 0;
+uint8_t confirmFocus = 0;  // 0 = Annulla (predefinito per i tasti fisici), 1 = Conferma
+uint32_t confirmAt = 0;
+const uint32_t CONFIRM_LOCK_MS = 600;     // subito dopo l'apertura non si conferma (doppio tocco accidentale)
+const uint32_t CONFIRM_TIMEOUT_MS = 10000;
+static const int CF_BTN_Y = 262, CF_BTN_W = 144, CF_BTN_H = 56;
+
+void askConfirm(uint8_t kind) {
+  confirmKind = kind;
+  confirmFocus = 0;
+  confirmAt = millis();
+  sfxPlay(SFX_TAP);
+}
+
 void openSettings() {
   settingsOpen = true;
+  confirmKind = 0;
   setFocus = 0;
   setLastInput = millis();
   lastTouch = setLastInput;
@@ -2273,6 +2344,7 @@ void openSettings() {
 
 void closeSettings() {
   settingsOpen = false;
+  confirmKind = 0;
   lastTouch = millis();
   sfxPlay(SFX_TAP);
 }
@@ -2332,10 +2404,27 @@ void actOff() {
   powerOff();
 }
 
+// esito del dialogo di conferma
+void confirmResolve(bool yes) {
+  uint8_t kind = confirmKind;
+  confirmKind = 0;
+  if (!yes) {
+    sfxPlay(SFX_TAP);
+    return;
+  }
+  if (kind == 1) actUnpair();
+  else if (kind == 2) actOff();
+}
+
 // tasti fisici: attiva il controllo evidenziato
 void settingsActivate() {
   setLastInput = millis();
   lastTouch = setLastInput;
+  if (confirmKind) {  // dialogo aperto: POWER sceglie il pulsante evidenziato
+    if (confirmFocus == 0) confirmResolve(false);
+    else if (millis() - confirmAt >= CONFIRM_LOCK_MS) confirmResolve(true);
+    return;
+  }
   switch (setFocus) {
     case SR_VOL: actVolume(1, true); break;
     case SR_AUTOVOL: actAutoVol(); break;
@@ -2344,8 +2433,8 @@ void settingsActivate() {
     case SR_STANDBY: actStandby(1, true); break;
     case SR_LANG: actLang(1); break;
     case ST_ROWS + 0: actPair(); break;
-    case ST_ROWS + 1: actUnpair(); break;
-    case ST_ROWS + 2: actOff(); break;
+    case ST_ROWS + 1: askConfirm(1); break;
+    case ST_ROWS + 2: askConfirm(2); break;
     default: closeSettings(); break;
   }
 }
@@ -2364,6 +2453,14 @@ static bool inRect(int px, int py, int x, int y, int w, int h, int pad = 6) {
 void settingsTouch(int sx, int sy) {
   setLastInput = millis();
   lastTouch = setLastInput;
+  if (confirmKind) {  // dialogo di conferma: conta solo il tocco su Conferma; ogni altro tocco annulla
+    if (inRect(sx, sy, CX + 6, CF_BTN_Y, CF_BTN_W, CF_BTN_H, 2)) {
+      if (millis() - confirmAt >= CONFIRM_LOCK_MS) confirmResolve(true);
+    } else {
+      confirmResolve(false);
+    }
+    return;
+  }
   // righe con - / +
   for (int r = 0; r < ST_ROWS; r++) {
     int y = ST_ROW_Y[r];
@@ -2455,6 +2552,18 @@ void drawSettingsPage() {
   drawButton(CX + 6, ST_BTN_Y[1], 144, ST_BTN_H, TR(TXT_EXIT), bg, RGB565(235, 238, 248), setFocus == ST_ROWS + 3, fl && btnFlashId == ST_ROWS * 2 + 3);
   if ((int32_t)(toastUntil - t) > 0) centerText(toast, 394, 2, RGB565(255, 230, 140));
   else centerText(TR(TXT_SET_HINT), 400, 1, RGB565(110, 120, 140));
+  if (confirmKind && t - confirmAt > CONFIRM_TIMEOUT_MS) confirmKind = 0;  // dimenticato aperto: si chiude
+  if (confirmKind) {
+    const bool off = confirmKind == 2;
+    g->fillRoundRect(CX - 175, 112, 350, 222, 22, RGB565(14, 16, 26));
+    g->drawRoundRect(CX - 175, 112, 350, 222, 22, off ? RGB565(190, 80, 70) : RGB565(255, 220, 120));
+    centerText(off ? TR(TXT_SURE_OFF) : TR(TXT_SURE_FORGET), 150, 2, RGB565(235, 238, 248));
+    if (!off) centerText(TR(TXT_SURE_FORGET2), 192, 1, RGB565(150, 160, 185));
+    const bool armed = t - confirmAt >= CONFIRM_LOCK_MS;  // finche' non e' attivo, il pulsante e' spento
+    drawButton(CX - 150, CF_BTN_Y, CF_BTN_W, CF_BTN_H, TR(TXT_CANCEL), RGB565(36, 42, 62), RGB565(235, 238, 248), confirmFocus == 0, false);
+    drawButton(CX + 6, CF_BTN_Y, CF_BTN_W, CF_BTN_H, off ? TR(TXT_POWEROFF) : TR(TXT_FORGET),
+               armed ? RGB565(120, 40, 40) : RGB565(50, 40, 44), armed ? RGB565(255, 215, 205) : RGB565(120, 110, 112), confirmFocus == 1, false);
+  }
   if (canvas) canvas->flush();
 }
 
@@ -2543,6 +2652,7 @@ void drawFrame() {
     return;
   }
   C_CLAWD = (COLORS[styleColor].lvl <= petLevel) ? COLORS[styleColor].c : COLORS[0].c;
+  if (effCostume()) C_CLAWD = COSTUMES[effCostume()].body;
   if ((int32_t)(bootEnd - millis()) > 0) {  // avvio: solo l'animazione
     drawBoot();
     if (canvas) canvas->flush();
@@ -2715,11 +2825,12 @@ void handleLine(const char *line) {
   else if (startsWithCI(line, "autovol")) audioSetAutoVol(atoi(argOf(line, 7)) != 0);
   else if (startsWithCI(line, "micdebug")) audioMicDebug(atoi(argOf(line, 8)) != 0);
   else if (startsWithCI(line, "unlockall")) unlockAll = atoi(argOf(line, 9)) != 0;
-  else if (startsWithCI(line, "style")) {  // `style H G`: prova cappello e occhiali (non salvato)
-    int h = styleHat, v = styleGlasses;
-    sscanf(argOf(line, 5), "%d %d", &h, &v);
+  else if (startsWithCI(line, "style")) {  // `style H G C`: prova cappello, occhiali e costume (non salvato)
+    int h = styleHat, v = styleGlasses, c = styleCostume;
+    sscanf(argOf(line, 5), "%d %d %d", &h, &v, &c);
     styleHat = constrain(h, 0, N_HATS - 1);
     styleGlasses = constrain(v, 0, N_GLS - 1);
+    styleCostume = constrain(c, 0, N_COSTUMES - 1);
   }
   else if (startsWithCI(line, "demo")) demoSet(atoi(argOf(line, 4)));
   else if (startsWithCI(line, "autorotate")) setAutoRotate(atoi(argOf(line, 10)) != 0);
@@ -2943,7 +3054,8 @@ void pollButton() {
       return;
     }
     if (settingsOpen) {
-      setFocus = (setFocus + 1) % SET_FOCUS_N;
+      if (confirmKind) confirmFocus ^= 1;  // BOOT alterna Annulla / Conferma
+      else setFocus = (setFocus + 1) % SET_FOCUS_N;
       setLastInput = ms;
       lastTouch = ms;
       sfxPlay(SFX_TAP);
@@ -2994,6 +3106,12 @@ void cycleHat() {
   for (int i = 1; i <= N_HATS; i++) {
     int h = (styleHat + i) % N_HATS;
     if (HAT_LVL[h] <= STYLE_LVL) { styleHat = h; break; }
+  }
+}
+void cycleCostume() {
+  for (int i = 1; i <= N_COSTUMES; i++) {
+    int c = (styleCostume + i) % N_COSTUMES;
+    if (COSTUMES[c].lvl <= STYLE_LVL) { styleCostume = c; break; }
   }
 }
 void cycleGlasses() {
@@ -3062,11 +3180,12 @@ void onGesture(int dx, int dy, uint32_t dur, int sx, int sy) {
         }
       }
     } else if (page == PG_STYLE) {
-      for (int i = 0; i < 4; i++) {
-        if (inRect(sx, sy, CX + STY_X[i & 1], STY_Y[i >> 1], STY_W, STY_H)) {
+      for (int i = 0; i < STY_N; i++) {
+        if (inRect(sx, sy, CX + STY_BX[i], STY_BY[i], STY_BW[i], STY_H)) {
           if (i == 0) cycleColor();
           else if (i == 1) cycleHat();
           else if (i == 2) cycleGlasses();
+          else if (i == 4) cycleCostume();
           else audioSetEnabled(!audioEnabled());
           styFlashId = i;
           styFlashUntil = millis() + 150;
@@ -3153,6 +3272,7 @@ void setup() {
     styleColor = pf.getUChar("col", 0) % N_COLORS;
     styleHat = pf.getUChar("hat", 3) % N_HATS;
     styleGlasses = pf.getUChar("gls", 2) % N_GLS;
+    styleCostume = pf.getUChar("cos", 0) % N_COSTUMES;
     autoStandbyMin = pf.getUShort("asb", 10);
     userBrightness = pf.getUChar("bri", 120);
     gLang = pf.getUChar("lang", LANG_IT) % LANG_COUNT;
@@ -3198,7 +3318,7 @@ void loop() {
     }
     if (tmRunning) tmLast = now;  // il timer resta in pausa
     batUpdate(now);
-    delay(30);
+    delay(50);  // schermo spento: basta controllare seriale/BLE/tasti ~20 volte al secondo
     return;
   }
 
@@ -3280,10 +3400,27 @@ void loop() {
   // luminosita': bassa in sleep (protegge l'AMOLED)
   // (un tocco recente la alza per qualche secondo)
   bool dim = state == S_SLEEP && (lastTouch == 0 || ago(now, lastTouch) > 20000);
-  setBrightnessSmooth(dim ? 6 : userBrightness);
+  // a riposo da un minuto senza tocchi: luminosita' ridotta (l'AMOLED consuma e scalda in proporzione)
+  bool idleDim = !dim && state == S_IDLE && !demoActive && !settingsOpen && !tmRunning &&
+                 ago(now, lastTouch) > 60000 && ago(now, lastEvent) > 60000;
+  setBrightnessSmooth(dim ? 6 : idleDim ? (uint8_t)max(20, (int)userBrightness * 55 / 100) : userBrightness);
 
-  if (now - lastFrame >= 33) {  // ~30 fps
+  // Ritmo dei fotogrammi: ridisegnare e inviare tutto il canvas 466x466 costa CPU, bus e AMOLED.
+  // Animazione vivace (lavoro, tocchi, effetti) = 30 fps; riposo = 20 fps; sleep = 10 fps.
+  auto live = [now](uint32_t until) { return (int32_t)(until - now) > 0; };
+  bool lively = state != S_IDLE && state != S_SLEEP;
+  lively = lively || ago(now, lastTouch) < 8000 || demoActive || settingsOpen || tmRunning ||
+           live(fxUntil) || live(dizzyUntil) || live(lvlUpUntil) || live(alarmUntil) || live(resetUntil) ||
+           live(laughUntil) || live(annoyUntil) || live(midnightUntil) || live(petUntil) || live(batAlertUntil) ||
+           live(batFullUntil) || live(toastUntil) || live(bootEnd) || blePairingOpen(nullptr) || blePasskeyActive(nullptr);
+  if (lively) cpuBusyUntil = now + 3000;
+  setCpu(live(cpuBusyUntil) ? 240 : 160);  // risale subito, scende dopo 3 s di calma
+  const uint32_t frameMs = lively ? 33 : (state == S_SLEEP ? 100 : 50);
+
+  if (now - lastFrame >= frameMs) {
     lastFrame = now;
     drawFrame();
+  } else {
+    delay(2);  // cede la CPU all'idle task (clock gating): prima il loop girava a vuoto al 100%
   }
 }

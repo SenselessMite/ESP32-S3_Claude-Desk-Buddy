@@ -307,7 +307,7 @@ static void micMeasure() {
 
 static void audioTask(void *) {
   uint8_t id;
-  uint32_t lastSound = 0;
+  uint32_t lastSound = 0, lastMic = 0;
   for (;;) {
     if (xQueueReceive(audioQ, &id, pdMS_TO_TICKS(2000))) {
       if (audioOn && id < SFX_COUNT) {
@@ -320,8 +320,10 @@ static void audioTask(void *) {
         if (uxQueueMessagesWaiting(audioQ) == 0) digitalWrite(PIN_PA, LOW);
         lastSound = millis();
       }
-    } else if (autoVolOn && es7210Ok && audioOn && !quiet && millis() - lastSound > 1000 && (int32_t)(millis() - micRetryAt) >= 0) {
-      micMeasure();  // coda vuota da 2 s e altoparlante zitto: si ascolta la stanza
+    } else if (autoVolOn && es7210Ok && audioOn && !quiet && millis() - lastSound > 1000 && millis() - lastMic > 8000 &&
+               (int32_t)(millis() - micRetryAt) >= 0) {
+      lastMic = millis();
+      micMeasure();  // coda vuota e altoparlante zitto: ogni 8 s si ascolta la stanza (il rumore cambia piano)
     }
   }
 }
@@ -343,11 +345,6 @@ static void audioBegin() {
   audioQ = xQueueCreate(6, sizeof(uint8_t));
   xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 1, nullptr, 0);
   audioReady = true;
-}
-
-void hwStandby(bool on) {
-  quiet = on;
-  if (on && audioQ) xQueueReset(audioQ);
 }
 
 void sfxPlay(uint8_t id) {
@@ -431,13 +428,49 @@ static void imuBegin() {
   imuOk = true;
 }
 
+static uint32_t imuResumeAt = 0;  // dopo il risveglio i primi campioni non sono affidabili
+
+// ---- Standby: codec audio, microfoni e accelerometro in power-down (all'uscita si reinizializzano) ----
+static void es8311Suspend() {
+  esW(0x32, 0x00); esW(0x17, 0x00); esW(0x0E, 0xFF); esW(0x12, 0x02);
+  esW(0x14, 0x00); esW(0x0D, 0xFA); esW(0x15, 0x00); esW(0x37, 0x08); esW(0x45, 0x01);
+}
+
+static void es7210Suspend() {
+  e7W(0x4B, 0xFF); e7W(0x4C, 0xFF);  // microfoni spenti
+  e7W(0x01, 0x3F);                    // clock spenti
+  e7W(0x06, 0x07);                    // power-down
+}
+
+void hwStandby(bool on) {
+  quiet = on;
+  if (on) {
+    if (audioQ) xQueueReset(audioQ);
+    if (audioReady) {
+      digitalWrite(PIN_PA, LOW);
+      es8311Suspend();
+      if (es7210Ok) es7210Suspend();
+    }
+    if (imuOk) imuWr(0x08, 0x00);  // accelerometro off
+  } else {
+    if (audioReady) {
+      es8311Init();
+      if (es7210Ok) es7210Ok = es7210Init();
+    }
+    if (imuOk) {
+      imuWr(0x08, 0x01);           // accelerometro on
+      imuResumeAt = millis() + 150;
+    }
+  }
+}
+
 static float imuGx = 0, imuGy = 0;  // ultimo campione (g), per l'orientamento
 static uint32_t imuSeq = 0;         // incrementa a ogni campione nuovo
 
 bool imuShaken(uint32_t now) {
   static uint32_t lastPoll = 0, lastPeak = 0, cooldown = 0;
   static uint8_t peaks = 0;
-  if (!imuOk || now - lastPoll < 20) return false;
+  if (!imuOk || now - lastPoll < 20 || (int32_t)(now - imuResumeAt) < 0) return false;
   lastPoll = now;
   uint8_t b[6];
   if (!imuRd(0x35, b, 6)) return false;
